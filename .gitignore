@@ -1,0 +1,9 @@
+# Agent tooling — installed skills are symlinks into ~/.agents, not project source
+.agents/
+.claude/
+skills-lock.json
+
+# OS / editor cruft
+Thumbs.db
+.DS_Store
+*.swp
