@@ -3,8 +3,8 @@
 SGLang · graph MCP harness · continuous RL hot-swap — 3k DAU / ~750 concurrent / 30k conversations per day / 2–8 s response SLA
 
 > **A3B = Mixture-of-Experts: 35B total parameters, ~3B active per token.**
-> VRAM is sized by total params (~35 GB at FP8) but compute and memory bandwidth by active params — so decode runs ~4–5× faster than a dense 35B and each replica fits on **one** H100 at TP=1.
-> Live fleet drops from 6× H100 to **3× H100**. Replica count is set by the **latency SLA, not throughput**.
+> VRAM is sized by total params (~35 GB at FP8) but compute and memory bandwidth by active params — so decode runs ~4–5× faster than a dense 35B and each replica fits on **one** GPU at TP=1.
+> Live fleet drops from 6 GPUs to **3× H200 141 GB** on one `p5e.48xlarge`. Replica count is set by the **latency SLA, not throughput** — and on H200 the SLA is met with ~3.4 s of slack.
 
 *Markdown version of `deployment-architecture.html`, which carries the same figures as inline SVG with PNG/PDF export.*
 *Full AWS cost breakdown in `PLATFORM_REPORT.md`; engineering detail in `SYSTEM_REQUIREMENTS.md`.*
@@ -12,6 +12,8 @@ SGLang · graph MCP harness · continuous RL hot-swap — 3k DAU / ~750 concurre
 ---
 
 ## Fig. 1 — Live production request path (AWS)
+
+![Live production request path: users to ALB/WAF to Chat API to SQS to MCP Graph Orchestrator to inference LB to 3x SGLang replicas on H200, plus the MCP tool tier and offline jobs](images/fig1-request-path.png)
 
 All components sit in an **AWS VPC on private subnets, with no public GPU ingress**. Dashed groups below are security-group boundaries.
 
@@ -26,10 +28,10 @@ flowchart TB
     mcp["MCP Graph Orchestrator<br/>tools as graph nodes · independent edges in parallel<br/>guards: 6-iteration cap + token budget + 6 s deadline<br/>3× m7g.2xlarge — holds the loop, not the GPU"]
     ilb["Inference Load Balancer<br/>least-outstanding-requests<br/>prefix-hash affinity → RadixAttention hits"]
 
-    subgraph gpupool["sg-inference :30000 — orchestrator only · p5.48xlarge"]
-        s1["SGLang 1 · ACTIVE<br/>35B-A3B MoE · FP8 · TP=1<br/>1× H100 80G · ~96 KV slots"]
-        s2["SGLang 2 · ACTIVE<br/>35B-A3B MoE · FP8 · TP=1<br/>1× H100 80G · ~96 KV slots"]
-        s3["SGLang 3 · STANDBY<br/>N+1 spare + hot-swap target<br/>1× H100 80G"]
+    subgraph gpupool["sg-inference :30000 — orchestrator only · p5e.48xlarge"]
+        s1["SGLang 1 · ACTIVE<br/>35B-A3B MoE · FP8 · TP=1<br/>1× H200 141G · ~255 KV slots"]
+        s2["SGLang 2 · ACTIVE<br/>35B-A3B MoE · FP8 · TP=1<br/>1× H200 141G · ~255 KV slots"]
+        s3["SGLang 3 · STANDBY<br/>N+1 spare + hot-swap target<br/>1× H200 141G"]
     end
 
     subgraph toolsvc["sg-tools — per-tool scoped tokens, no shared superuser credential"]
@@ -101,7 +103,7 @@ flowchart TB
 | MCP Graph Orchestrator | 3× `m7g.2xlarge` (8 vCPU / 32 GB) | CPU-bound routing; holds the loop, not the GPU |
 | Async queue | SQS | 75k messages/day |
 | Session cache | ElastiCache `cache.r7g.large` + replica | 750 sessions × ~200 KB ≈ 150 MB |
-| **SGLang pool** | **3× H100 80 GB on one `p5.48xlarge`** | **2 active + 1 standby, FP8, TP=1** |
+| **SGLang pool** | **3× H200 141 GB on one `p5e.48xlarge`** | **2 active + 1 standby, FP8, TP=1** |
 | Inference LB | Least-outstanding + prefix hash | Load-bearing, not an optimisation |
 | Chat history / auth | RDS `db.r7g.2xlarge` Multi-AZ, 1 TB gp3 | ~220 GB/yr, ~5 QPS — no sharding |
 | Vector DB | OpenSearch Serverless, or 3× `r7g.xlarge` | ~500 GB/yr with index overhead |
@@ -114,12 +116,14 @@ flowchart TB
 
 ## Fig. 2 — Training, gated hot-swap, and the scheduled ML track
 
+![Training pipeline: LoRA pre-training → GRPO RL on a spare H200 → S3 model registry → canary production testing → automated eval gate → hot-swap into the live fleet, with production traces feeding back into RL](images/fig2-training-hotswap.png)
+
 ```mermaid
 flowchart LR
     pre["1 · Pre-training<br/>LoRA continued / domain-adaptive<br/>~66 GB → fits 1× H200 or B200<br/>H200 ~1.9B tok/day · B200 ~4.3B<br/>from scratch: 1.3–2.9 yr — not feasible"]
-    rl["2 · Post-training, RL<br/>GRPO · LoRA · reference model is free<br/>~66 GB → 1× H200 / B200 / H100<br/>~600–1,200 RL steps/day on H200<br/>full-param ~520 GB — will not fit"]
+    rl["2 · Post-training, RL<br/>GRPO · LoRA · reference model is free<br/>~66 GB → spare H200 on the same p5e<br/>~600–1,200 RL steps/day · 2× headroom<br/>full-param ~520 GB — will not fit"]
     reg["3 · Model Registry<br/>S3 · versioned, immutable<br/>35 GB per FP8 checkpoint<br/>retain 50 → ~2 TB"]
-    test["4 · Production Testing<br/>SGLang canary · shadow traffic<br/>1 GPU on the same p5.48xlarge<br/>must be H100 — L40S cannot<br/>reproduce production latency"]
+    test["4 · Production Testing<br/>SGLang canary · shadow traffic<br/>1 GPU on the same p5e.48xlarge<br/>must be H200 — L40S cannot<br/>reproduce production latency"]
     gate{"Automated Eval Gate<br/>safety · regression · task accuracy<br/>p99 vs the 8 s SLA · tool validity<br/>fail → block + auto-rollback"}
     live["5 · Live SGLang Fleet — Fig. 1<br/>hot-swap: update_weights_from_disk<br/>in-place, connections held open<br/>fallback: blue/green drain via inference LB"]
 
@@ -168,19 +172,28 @@ flowchart LR
 
 ## MoE halves the fleet
 
-- VRAM by **total** params: ~35 GB at FP8 → fits **1× H100, TP=1**
+- VRAM by **total** params: ~35 GB at FP8 → fits **1× H200, TP=1**
 - Bandwidth by **active** params: 3 GB per token, not 35
-- Decode **~4–5× faster** than a dense 35B — ~200 tok/s single-stream
-- KV ~48 KB/token → **~96 slots** per replica at 8K context
-- **BF16 would not fit** (70 GB weights leaves ~2 GB for KV) — FP8 is required for TP=1
+- Decode **~4–5× faster** than a dense 35B — ~290–360 tok/s single-stream on H200
+- KV ~48 KB/token → **~255 slots** per replica at 8K context
+- **BF16 fits on 141 GB but is still rejected** — 2× the bytes read per token halves decode; FP8 is chosen for speed, not capacity
+
+## H200 over H100 — bandwidth, not memory
+
+- Same GH100 die, same ~1,979 TFLOPS FP8 → **prefill unchanged**
+- 4.8 TB/s vs 3.35 TB/s → **decode ×1.43**, and decode is what the SLA spends
+- ~6.4 s → **~4.6 s** typical; 6-iteration worst case ~9.6 s → **~7.0 s**
+- 96 → **255 KV slots** per replica; RL gets a real 141 GB card, as specified
+- **+$31,247/yr on a 3-year commit (~15%)** — `p5` remains a costed fallback
 
 ## Latency sets the replica count
 
-- Throughput needs **1 replica**; the 8-second SLA needs **2**
-- 1 replica → batch 25 → 120 tok/s per stream → **~8.5 s, breaches**
-- 2 replicas → batch 12 → 180 tok/s per stream → **~6.4 s, meets**
-- **The 6-iteration cap breaches 8 s** (~9.6 s) — this needs a wall-clock deadline, not just an iteration cap
-- SSE streaming brings TTFT to ~2.6 s — the highest-leverage fix
+- Throughput needs **1 replica**; on H200 the SLA no longer *forces* a second — it buys margin
+- 1 replica → batch 25 → 170 tok/s per stream → **~6.7 s, meets (thin)**
+- 2 replicas → batch 12 → 260 tok/s per stream → **~4.6 s, recommended**
+- **Single-replica serving is now a supported degraded mode** — maintenance and failover stop being SLA events
+- **The 6-iteration cap no longer breaches** (~7.0 s) — but ~1 s of margin still needs a wall-clock deadline
+- SSE streaming brings TTFT to ~1.9 s — still the highest-leverage fix
 
 ## Sizing basis
 
@@ -192,15 +205,16 @@ flowchart LR
 
 ## AWS footprint
 
-- **1× `p5.48xlarge`** carries live (3 GPUs) + canary (1 GPU), 4 spare for training
-- Price against **Capacity Blocks / Savings Plans** — on-demand p5 is the worst rate
+- **1× `p5e.48xlarge`** carries live (3 GPUs) + canary (1 GPU), 4 spare for training
+- Price against **Capacity Blocks / Savings Plans** — on-demand p5e is the worst rate
+- **$311,089/yr all-in on a 3-year commit** · $0.0284 per conversation · $8.64 per user/month
 - `g6.4xlarge` for the scheduled ML model — an exact match to the stated spec
 - `c7g.2xlarge` is the 8 vCPU graph weight worker
 - Data tier is small: ~220 GB/yr Postgres, ~500 GB/yr vector, ~45 GB/yr graph
 
 ## Training on one GPU — verdict
 
-- **LoRA RL fits: ~66 GB** on 1× H200 (141 GB) or B200 (180 GB). ~600–1,200 steps/day
+- **LoRA RL fits: ~66 GB** on 1× H200 (141 GB) or B200 (180 GB) — under half the device. ~600–1,200 steps/day
 - **Full-parameter RL does not: ~520 GB.** AdamW FP32 state alone is 280 GB
 - With LoRA the KL **reference model is free** — base weights, adapters disabled
 - LoRA continued pre-training viable: **~1.9 B tok/day on H200, ~4.3 B on B200**
@@ -208,14 +222,15 @@ flowchart LR
 
 ## Open risks
 
-- **AWS sells no single H200 or B200** — both are 8-GPU SKUs. Use the **4 spare H100s on the `p5` already in the plan** rather than buying another instance
-- Training and serving would then share a machine — pin GPUs so a training job cannot breach the 8 s SLA
+- **AWS sells no single H200 or B200** — both are 8-GPU SKUs. Use the **4 spare H200s on the `p5e` already in the plan** rather than buying another instance. The stated "1× H200" requirement is then met literally, not substituted
+- Training and serving share a machine — pin GPUs so a training job cannot breach the 8 s SLA
+- **The `p5e` 3-year reserved rate is derived, not quoted** (~$27.344/hr, from p5's 43.2% discount ratio) — confirm with AWS; it carries ~$240k/yr
+- **`p5e` regional capacity is thinner than `p5`** — a lead-time risk, not only a cost question
 - Graph weight calculation: 8 vCPU is fine **incrementally**, not for global PageRank over 110 M nodes
 - Continuous graph ingestion needs a **retention / decay policy** from day one
-- **`p5e` (H200) is worth pricing for serving too** — ~1.43× decode, ~5.2 s end-to-end
 
 ---
 
 *Qwen/Qwen3.6-35B-A3B on SGLang · graph MCP harness · AWS · continuous RL with gated hot-swap.*
-*Directional estimates. Benchmark the real model on a single H100 and measure p99 against the 8-second ceiling before procurement.*
-*Full cost breakdown in `PLATFORM_REPORT.md` — $279,842/yr on a 3-year reserved `p5.48xlarge`, or $0.0256 per conversation.*
+*Directional estimates. Benchmark the real model on a single H200 and measure p99 against the 8-second ceiling before procurement.*
+*Full cost breakdown in `PLATFORM_REPORT.md` — $311,089/yr on a 3-year reserved `p5e.48xlarge`, or $0.0284 per conversation.*

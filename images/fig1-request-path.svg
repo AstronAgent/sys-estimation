@@ -1,0 +1,211 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1032" height="852" viewBox="-16 -16 1032 852" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, &quot;DejaVu Sans Mono&quot;, monospace">
+  <title>Fig. 1 — Live production request path (AWS)</title>
+  <rect x="-16" y="-16" width="1032" height="852" fill="#020617"/>
+
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrowstart" markerWidth="10" markerHeight="7" refX="1" refY="3.5" orient="auto">
+            <polygon points="10 0, 0 3.5, 10 7" fill="#64748b" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- ============ BOUNDARIES ============ -->
+        <rect x="35" y="112" width="935" height="685" rx="12" fill="rgba(251,191,36,0.04)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="48" y="131" fill="#fbbf24" font-size="10" font-weight="600">AWS VPC — private subnets, no public GPU ingress</text>
+
+        <rect x="45" y="588" width="310" height="155" rx="8" fill="transparent" stroke="#fb7185" stroke-width="1" stroke-dasharray="4,4"/>
+        <text x="56" y="606" fill="#fb7185" font-size="8">sg-inference :30000 — orchestrator only · p5e.48xlarge</text>
+
+        <rect x="600" y="482" width="350" height="200" rx="8" fill="transparent" stroke="#fb7185" stroke-width="1" stroke-dasharray="4,4"/>
+        <text x="612" y="500" fill="#fb7185" font-size="8">sg-tools — per-tool scoped tokens (no shared superuser cred)</text>
+
+        <rect x="600" y="700" width="350" height="80" rx="8" fill="rgba(100,116,139,0.06)" stroke="#64748b" stroke-width="1" stroke-dasharray="6,3"/>
+        <text x="612" y="716" fill="#94a3b8" font-size="8" font-weight="600">OFFLINE / SCHEDULED — never on the request path</text>
+
+        <!-- ============ ARROWS ============ -->
+        <line x1="500" y1="90" x2="500" y2="146" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="512" y="122" fill="#94a3b8" font-size="9">① HTTPS / SSE stream</text>
+
+        <line x1="500" y1="208" x2="500" y2="248" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="512" y="232" fill="#94a3b8" font-size="9">②</text>
+
+        <line x1="403" y1="281" x2="269" y2="281" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrowhead)"/>
+        <text x="336" y="273" fill="#fb7185" font-size="8" text-anchor="middle">③ verify JWT</text>
+
+        <line x1="597" y1="281" x2="731" y2="281" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="664" y="273" fill="#94a3b8" font-size="8" text-anchor="middle">④ session state</text>
+
+        <line x1="500" y1="310" x2="500" y2="320" stroke="#fb923c" stroke-width="1.5"/>
+        <line x1="500" y1="346" x2="500" y2="369" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="600" y="340" fill="#fb923c" font-size="8">⑤ async dispatch (SQS)</text>
+
+        <path d="M 318 415 L 252 415 Q 232 415 232 435 L 232 494" fill="none" stroke="#34d399" stroke-width="1.5"
+              marker-end="url(#arrowhead)" marker-start="url(#arrowstart)"/>
+        <text x="245" y="478" fill="#34d399" font-size="9">⑥ agentic loop · 2–6 passes/conv</text>
+
+        <line x1="200" y1="556" x2="200" y2="580" stroke="#fbbf24" stroke-width="1.5"/>
+        <line x1="106" y1="580" x2="302" y2="580" stroke="#fbbf24" stroke-width="1.5"/>
+        <line x1="106" y1="580" x2="106" y2="612" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="204" y1="580" x2="204" y2="612" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="302" y1="580" x2="302" y2="612" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="316" y="573" fill="#94a3b8" font-size="8">⑦ least-outstanding + prefix affinity</text>
+
+        <path d="M 682 400 L 720 400 Q 740 400 740 420 L 740 478" fill="none" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="750" y="438" fill="#a78bfa" font-size="9">⑧ MCP tool calls</text>
+
+        <!-- offline producers feeding the tool tier -->
+        <line x1="694" y1="720" x2="694" y2="668" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrowhead)"/>
+        <line x1="864" y1="720" x2="864" y2="668" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrowhead)"/>
+
+        <!-- ============ COMPONENTS ============ -->
+
+        <rect x="410" y="38" width="180" height="52" rx="6" fill="#0f172a"/>
+        <rect x="410" y="38" width="180" height="52" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="500" y="60" fill="white" font-size="11" font-weight="600" text-anchor="middle">End Users</text>
+        <text x="500" y="78" fill="#94a3b8" font-size="9" text-anchor="middle">3k DAU · ~750 concurrent sessions</text>
+
+        <rect x="395" y="150" width="210" height="58" rx="6" fill="#0f172a"/>
+        <rect x="395" y="150" width="210" height="58" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="500" y="172" fill="white" font-size="11" font-weight="600" text-anchor="middle">ALB + AWS WAF</text>
+        <text x="500" y="188" fill="#94a3b8" font-size="9" text-anchor="middle">L7 · TLS term · rate limit</text>
+        <text x="500" y="201" fill="#fbbf24" font-size="8" text-anchor="middle">peak ~3 req/s — trivial load</text>
+
+        <rect x="95" y="252" width="174" height="58" rx="6" fill="#0f172a"/>
+        <rect x="95" y="252" width="174" height="58" rx="6" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="182" y="274" fill="white" font-size="11" font-weight="600" text-anchor="middle">Auth Service</text>
+        <text x="182" y="290" fill="#94a3b8" font-size="9" text-anchor="middle">Cognito / OIDC · JWT</text>
+        <text x="182" y="303" fill="#fb7185" font-size="8" text-anchor="middle">2× m7g.large</text>
+
+        <rect x="405" y="252" width="192" height="58" rx="6" fill="#0f172a"/>
+        <rect x="405" y="252" width="192" height="58" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="501" y="274" fill="white" font-size="11" font-weight="600" text-anchor="middle">Chat API (stateless)</text>
+        <text x="501" y="290" fill="#94a3b8" font-size="9" text-anchor="middle">SSE stream — TTFT &lt; 3 s</text>
+        <text x="501" y="303" fill="#34d399" font-size="8" text-anchor="middle">2–4× m7g.xlarge (autoscaled)</text>
+
+        <rect x="731" y="252" width="174" height="58" rx="6" fill="#0f172a"/>
+        <rect x="731" y="252" width="174" height="58" rx="6" fill="rgba(8,51,68,0.4)" stroke="#38bdf8" stroke-width="1.5"/>
+        <text x="818" y="274" fill="white" font-size="11" font-weight="600" text-anchor="middle">ElastiCache Redis</text>
+        <text x="818" y="290" fill="#94a3b8" font-size="9" text-anchor="middle">sessions · tool-call state</text>
+        <text x="818" y="303" fill="#38bdf8" font-size="8" text-anchor="middle">~150 MB · cache.r7g.large + replica</text>
+
+        <rect x="420" y="322" width="160" height="24" rx="4" fill="rgba(251,146,60,0.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="500" y="338" fill="#fb923c" font-size="8" text-anchor="middle">SQS async task queue</text>
+
+        <rect x="320" y="372" width="362" height="86" rx="6" fill="#0f172a"/>
+        <rect x="320" y="372" width="362" height="86" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="501" y="395" fill="white" font-size="12" font-weight="600" text-anchor="middle">MCP Graph Orchestrator</text>
+        <text x="501" y="412" fill="#94a3b8" font-size="9" text-anchor="middle">tools as graph nodes · independent edges dispatched in parallel</text>
+        <text x="501" y="427" fill="#fb7185" font-size="9" text-anchor="middle">guards: 6-iteration cap + token budget + 6 s wall-clock deadline</text>
+        <text x="501" y="446" fill="#34d399" font-size="8" text-anchor="middle">3× m7g.2xlarge (8 vCPU / 32 GB) — holds the loop, not the GPU</text>
+
+        <rect x="95" y="498" width="210" height="58" rx="6" fill="#0f172a"/>
+        <rect x="95" y="498" width="210" height="58" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="200" y="520" fill="white" font-size="11" font-weight="600" text-anchor="middle">Inference Load Balancer</text>
+        <text x="200" y="536" fill="#94a3b8" font-size="9" text-anchor="middle">least-outstanding-requests</text>
+        <text x="200" y="549" fill="#fbbf24" font-size="8" text-anchor="middle">prefix-hash affinity → RadixAttention hits</text>
+
+        <!-- SGLang replicas: TP=1, one H200 each -->
+        <rect x="60" y="616" width="92" height="120" rx="6" fill="#0f172a"/>
+        <rect x="60" y="616" width="92" height="120" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="106" y="638" fill="white" font-size="10" font-weight="600" text-anchor="middle">SGLang #1</text>
+        <text x="106" y="657" fill="#94a3b8" font-size="8" text-anchor="middle">35B-A3B MoE</text>
+        <text x="106" y="671" fill="#94a3b8" font-size="8" text-anchor="middle">FP8 · TP=1</text>
+        <text x="106" y="685" fill="#94a3b8" font-size="8" text-anchor="middle">1× H200 141G</text>
+        <text x="106" y="704" fill="#34d399" font-size="8" text-anchor="middle">~255 KV slots</text>
+        <text x="106" y="716" fill="#34d399" font-size="8" text-anchor="middle">~260 tok/s/str</text>
+        <text x="106" y="730" fill="#fbbf24" font-size="7" text-anchor="middle">ACTIVE</text>
+
+        <rect x="158" y="616" width="92" height="120" rx="6" fill="#0f172a"/>
+        <rect x="158" y="616" width="92" height="120" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="204" y="638" fill="white" font-size="10" font-weight="600" text-anchor="middle">SGLang #2</text>
+        <text x="204" y="657" fill="#94a3b8" font-size="8" text-anchor="middle">35B-A3B MoE</text>
+        <text x="204" y="671" fill="#94a3b8" font-size="8" text-anchor="middle">FP8 · TP=1</text>
+        <text x="204" y="685" fill="#94a3b8" font-size="8" text-anchor="middle">1× H200 141G</text>
+        <text x="204" y="704" fill="#34d399" font-size="8" text-anchor="middle">~255 KV slots</text>
+        <text x="204" y="716" fill="#34d399" font-size="8" text-anchor="middle">~260 tok/s/str</text>
+        <text x="204" y="730" fill="#fbbf24" font-size="7" text-anchor="middle">ACTIVE</text>
+
+        <rect x="256" y="616" width="92" height="120" rx="6" fill="#0f172a"/>
+        <rect x="256" y="616" width="92" height="120" rx="6" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="302" y="638" fill="white" font-size="10" font-weight="600" text-anchor="middle">SGLang #3</text>
+        <text x="302" y="657" fill="#94a3b8" font-size="8" text-anchor="middle">35B-A3B MoE</text>
+        <text x="302" y="671" fill="#94a3b8" font-size="8" text-anchor="middle">FP8 · TP=1</text>
+        <text x="302" y="685" fill="#94a3b8" font-size="8" text-anchor="middle">1× H200 141G</text>
+        <text x="302" y="704" fill="#94a3b8" font-size="8" text-anchor="middle">N+1 spare</text>
+        <text x="302" y="716" fill="#94a3b8" font-size="8" text-anchor="middle">+ swap target</text>
+        <text x="302" y="730" fill="#fb7185" font-size="7" text-anchor="middle">STANDBY</text>
+
+        <text x="200" y="757" fill="#fbbf24" font-size="8" text-anchor="middle">⑨ hot-swap weight update lands here — Fig. 2 · 4 of 8 GPUs still free</text>
+
+        <!-- Tool tier -->
+        <rect x="615" y="512" width="158" height="64" rx="6" fill="#0f172a"/>
+        <rect x="615" y="512" width="158" height="64" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="694" y="533" fill="white" font-size="10" font-weight="600" text-anchor="middle">RDS PostgreSQL</text>
+        <text x="694" y="549" fill="#94a3b8" font-size="8" text-anchor="middle">users · auth · chat history</text>
+        <text x="694" y="566" fill="#a78bfa" font-size="8" text-anchor="middle">~220 GB/yr · db.r7g.2xlarge M-AZ</text>
+
+        <rect x="785" y="512" width="158" height="64" rx="6" fill="#0f172a"/>
+        <rect x="785" y="512" width="158" height="64" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="864" y="533" fill="white" font-size="10" font-weight="600" text-anchor="middle">Vector DB</text>
+        <text x="864" y="549" fill="#94a3b8" font-size="8" text-anchor="middle">OpenSearch / Qdrant · RAG</text>
+        <text x="864" y="566" fill="#a78bfa" font-size="8" text-anchor="middle">~500 GB/yr with index · 3 nodes</text>
+
+        <rect x="615" y="600" width="158" height="64" rx="6" fill="#0f172a"/>
+        <rect x="615" y="600" width="158" height="64" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="694" y="621" fill="white" font-size="10" font-weight="600" text-anchor="middle">Knowledge Graph</text>
+        <text x="694" y="637" fill="#94a3b8" font-size="8" text-anchor="middle">Neptune / Neo4j r7g.2xlarge</text>
+        <text x="694" y="654" fill="#a78bfa" font-size="8" text-anchor="middle">~110M nodes/yr · ~45 GB/yr</text>
+
+        <rect x="785" y="600" width="158" height="64" rx="6" fill="#0f172a"/>
+        <rect x="785" y="600" width="158" height="64" rx="6" fill="rgba(8,51,68,0.4)" stroke="#38bdf8" stroke-width="1.5"/>
+        <text x="864" y="621" fill="white" font-size="10" font-weight="600" text-anchor="middle">ML Result Cache</text>
+        <text x="864" y="637" fill="#94a3b8" font-size="8" text-anchor="middle">DynamoDB + native TTL</text>
+        <text x="864" y="654" fill="#38bdf8" font-size="8" text-anchor="middle">read-only for the LLM · ~ms</text>
+
+        <!-- Offline producers -->
+        <rect x="615" y="722" width="158" height="54" rx="6" fill="#0f172a"/>
+        <rect x="615" y="722" width="158" height="54" rx="6" fill="rgba(30,41,59,0.6)" stroke="#64748b" stroke-width="1.5"/>
+        <text x="694" y="742" fill="white" font-size="10" font-weight="600" text-anchor="middle">Graph Ingestion Worker</text>
+        <text x="694" y="757" fill="#94a3b8" font-size="8" text-anchor="middle">continuous · edge-weight calc</text>
+        <text x="694" y="770" fill="#94a3b8" font-size="8" text-anchor="middle">c7g.2xlarge — 8 vCPU · ~12 writes/s</text>
+
+        <rect x="785" y="722" width="158" height="54" rx="6" fill="#0f172a"/>
+        <rect x="785" y="722" width="158" height="54" rx="6" fill="rgba(30,41,59,0.6)" stroke="#64748b" stroke-width="1.5"/>
+        <text x="864" y="742" fill="white" font-size="10" font-weight="600" text-anchor="middle">Scheduled ML Model</text>
+        <text x="864" y="757" fill="#94a3b8" font-size="8" text-anchor="middle">runs on a fixed frequency</text>
+        <text x="864" y="770" fill="#94a3b8" font-size="8" text-anchor="middle">g6.4xlarge — 16 vCPU / 64 GB / L4</text>
+
+        <!-- ============ LEGEND ============ -->
+        <text x="758" y="34" fill="white" font-size="10" font-weight="600">Legend</text>
+
+        <rect x="758" y="44" width="16" height="10" rx="2" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="780" y="53" fill="#94a3b8" font-size="8">Service / GPU</text>
+
+        <rect x="758" y="60" width="16" height="10" rx="2" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="780" y="69" fill="#94a3b8" font-size="8">Datastore</text>
+
+        <rect x="758" y="76" width="16" height="10" rx="2" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="780" y="85" fill="#94a3b8" font-size="8">Load balancer</text>
+
+        <rect x="758" y="92" width="16" height="10" rx="2" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1"/>
+        <text x="780" y="101" fill="#94a3b8" font-size="8">Auth / security</text>
+
+        <rect x="890" y="44" width="16" height="10" rx="2" fill="rgba(8,51,68,0.4)" stroke="#38bdf8" stroke-width="1"/>
+        <text x="912" y="53" fill="#94a3b8" font-size="8">Cache</text>
+
+        <rect x="890" y="60" width="16" height="10" rx="2" fill="rgba(251,146,60,0.3)" stroke="#fb923c" stroke-width="1"/>
+        <text x="912" y="69" fill="#94a3b8" font-size="8">Queue</text>
+
+        <rect x="890" y="76" width="16" height="10" rx="2" fill="rgba(30,41,59,0.6)" stroke="#64748b" stroke-width="1"/>
+        <text x="912" y="85" fill="#94a3b8" font-size="8">Offline job</text>
+
+        <rect x="890" y="92" width="16" height="10" rx="2" fill="transparent" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="912" y="101" fill="#94a3b8" font-size="8">Sec. group</text>
+      </svg>
