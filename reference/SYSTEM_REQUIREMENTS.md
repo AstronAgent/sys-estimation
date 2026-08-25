@@ -4,9 +4,9 @@
 **Version:** v5 — supersedes v4. Serving hardware moved from H100 (`p5.48xlarge`) to **H200 (`p5e.48xlarge`)**. §3, §4, §5.1, §8 and §9 all change.
 **Date:** 2026-08-20
 **Companions:**
-- `PLATFORM_REPORT.md` — client-facing report with the full AWS cost breakdown
-- `deployment-architecture.md` — diagrams as Mermaid (renders on GitHub/GitLab)
-- `deployment-architecture.html` — same diagrams as inline SVG, with PNG/PDF export
+- `../PLATFORM_REPORT.md` — client-facing report with the full AWS cost breakdown
+- `../deployment-architecture.md` — diagrams, rendered plus Mermaid source
+- `../deployment-architecture.html` — same diagrams as inline SVG, with PNG/PDF export
 
 > **Headline change from v4 — H200 replaces H100.** The serving fleet moves from `p5.48xlarge` (8× H100 80 GB) to **`p5e.48xlarge` (8× H200 141 GB)**. H200 is the same GH100 die with a different memory subsystem: 141 GB of HBM3e at **4.8 TB/s** instead of 80 GB of HBM3 at 3.35 TB/s. Decode is memory-bandwidth-bound, so it runs **~1.43× faster**; prefill is compute-bound and is unchanged.
 >

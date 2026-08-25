@@ -7,7 +7,7 @@ SGLang · graph MCP harness · continuous RL hot-swap — 3k DAU / ~750 concurre
 > Live fleet drops from 6 GPUs to **3× H200 141 GB** on one `p5e.48xlarge`. Replica count is set by the **latency SLA, not throughput** — and on H200 the SLA is met with ~3.4 s of slack.
 
 *Markdown version of `deployment-architecture.html`, which carries the same figures as inline SVG with PNG/PDF export.*
-*Full AWS cost breakdown in `PLATFORM_REPORT.md`; engineering detail in `SYSTEM_REQUIREMENTS.md`.*
+*Full AWS cost breakdown in `PLATFORM_REPORT.md`; engineering detail in `reference/SYSTEM_REQUIREMENTS.md`.*
 
 ---
 
