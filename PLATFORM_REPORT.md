@@ -95,7 +95,9 @@ SGLang's RadixAttention prefix caching removes roughly **half the total prefill 
 
 **Concurrency.** Decode wall-time per conversation ≈ 5 s; peak arrival ≈ 1.2/s. Little's Law gives **~25 concurrent decoding streams** at peak, against 750 open sessions. Sessions are cheap (Redis); decode slots are expensive (HBM).
 
-> **~25 is retained as a conservative upper bound on H200.** Faster decode drains the queue faster, so the true steady-state concurrency on H200 is lower — which would raise per-stream speed further and improve latency again. The sizing below deliberately does not take that credit; it holds concurrency at the H100 figure so the batch sizes in §4.1 stay pessimistic.
+> **~25 is retained as a conservative upper bound.** Two separate effects push the true figure lower. Faster decode on H200 drains the queue faster. And Little's Law applied literally to the arrival rate above gives ~6, not ~25 — a ~4× gap that is not derived anywhere in this report, and which most likely reflects a business-hours load profile that was never written down. The sizing below deliberately takes neither credit: it holds concurrency at ~25 so the batch sizes in §4.1 stay pessimistic, because fewer streams means smaller batches, faster per-stream decode, and better latency than modelled. **The full model and this open item are set out in `SYSTEM_REQUIREMENTS.md` §2.1 and §2.1.8**, and both are on the pre-sign-off checklist.
+
+> **The complete mathematical model — symbols, equations, and the five constraints the design must satisfy — is stated explicitly in `SYSTEM_REQUIREMENTS.md` §2.1.** Every figure in this report is reproducible from it plus the assumptions in Appendix A.
 
 > **The session count does not drive GPU sizing.** Little's Law runs off arrival rate, not open sessions, so revising the target from 2,000 to 750 leaves the GPU fleet unchanged. It reduces the Redis working set (~400 MB → ~150 MB) and trims the Chat API autoscale range — about $119/month in total.
 >
@@ -521,6 +523,7 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 | RL checkpoint regresses production | Quality incident | Automated eval gate with p99 latency check; no direct RL→prod path (§7.3) |
 | `p5e` capacity unavailable in the target region | Procurement delay | Confirm p5e/p5en availability early; `p5` (H100) remains a working fallback at the SLA cost set out in §10.2 |
 | p5e 3-year reserved rate worse than the derived $27.344/hr | Budget overrun on the largest line | Confirm with AWS before the purchase order (§8.1) |
+| Concurrency figure (~25 streams) not derived from the stated arrival rate | Batch sizes, and therefore every latency number, rest on an unverified input | Conservative direction — real latency should be better, not worse. Measure directly under production traffic; see `SYSTEM_REQUIREMENTS.md` §2.1.8 |
 
 ---
 
@@ -547,6 +550,8 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 - [ ] **Measure p99 end-to-end latency under peak concurrency against the 8 s ceiling** — this is the acceptance criterion, not throughput
 - [ ] Measure the 6-iteration worst case specifically — modelled at ~7.0 s with ~1 s of margin
 - [ ] Measure the real prefix-cache hit rate under agentic traffic (assumed ~50% prefill saving)
+- [ ] **Measure concurrent decoding streams and decode wall-time under production-shaped traffic** — resolves the ~6-vs-~25 gap (`SYSTEM_REQUIREMENTS.md` §2.1.8) that underpins every batch size and latency figure
+- [ ] **Confirm the daily load profile** — 24-hour uniform, or concentrated into business hours
 - [ ] Measure the actual distribution of iterations per conversation (assumed avg 2.5, cap 6)
 - [ ] Confirm SSE streaming delivers time-to-first-token under ~3 s
 - [ ] Load-test graph ingestion at 12 writes/s with weight calculation running concurrently on 8 vCPU
@@ -576,6 +581,8 @@ Every number in this report derives from the inputs in §1 plus the following. E
 | 11 | Commercial API comparison rate | $0.50/M in, $1.50/M out | Shifts the build-vs-buy multiple in §9 |
 | 12 | Utilisation basis | 730 hours/month | Standard AWS month |
 | 13 | `p5e` 3-year reserved discount | 43.2% of on-demand, taken from `p5` | ±$25k/yr on the largest line; **derived, not quoted — confirm with AWS** |
+| 14 | Concurrent decoding streams at peak | ~25 (conservative) | Sets batch size and therefore per-stream decode. **Does not follow from Appx 1 + 7, which give ~6** — see `SYSTEM_REQUIREMENTS.md` §2.1.8. Conservative, so latency is better than modelled, not worse |
+| 15 | Daily load profile | 24-hour uniform | The concurrency figure in use implies business-hours concentration instead. Restating it moves peak arrival, not the daily totals |
 
 **All figures are back-of-the-envelope estimates.** They are directionally correct and sufficient to scope a purchase order, but the GPU count and the latency SLA must be confirmed by load-testing the actual model on the actual hardware before procurement.
 

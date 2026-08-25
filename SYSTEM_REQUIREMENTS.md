@@ -65,11 +65,134 @@
 | **Decode tokens** | **30 M** | 350 tok/s | **~1,200 tok/s** |
 | Prefill, cached | 150 M | 1,750 tok/s | ~6,100 tok/s |
 
-**Concurrency.** By Little's Law, concurrent *decoding* streams = 1.2/s arrival × ~5 s decode ≈ **~7–25 streams** depending on batch pressure. Of 750 open sessions, roughly **3% are generating at any instant**.
+**Concurrency.** By Little's Law, concurrent *decoding* streams = 1.2/s arrival × ~5 s decode ≈ **~6 streams**; the sizing tables use a conservative **~25**. Of 750 open sessions, at most a few percent are generating at any instant. **The gap between 6 and 25 is not derived anywhere — see §2.1.8.**
 
 > **Revising concurrent sessions from 2,000 to 750 does not change GPU sizing.** Little's Law runs off the *arrival rate* (30,000 conversations/day × 3.5× peak = 1.2/s), not the number of open sessions. Sessions are held in Redis and cost almost nothing; only actively decoding streams consume HBM. The change reduces the Redis working set and the Chat API connection count — nothing on the GPU tier.
 
 > **750 is also the more internally consistent figure.** At 1.2 conversations/s peak arrival, 750 concurrent sessions implies an average session length of ~10.4 minutes — plausible for a chat with 2–6 agentic turns. The earlier 2,000 figure would have implied ~28-minute sessions.
+
+
+---
+
+## 2.1 The mathematical model, stated explicitly
+
+Everything in §3–§5 and in the cost tables is produced by the equations below. They are written out so each one can be checked, disputed, or re-run against measured values rather than inferred from the prose.
+
+### 2.1.1 Symbols
+
+**Given by the client (§1) — not chosen here:**
+
+| Symbol | Meaning | Value |
+|---|---|---|
+| `U` | daily active users | 3,000 |
+| `c` | conversations per user per day | 10 |
+| `T` | tokens per conversation (final context) | 5,000 |
+| `n_typ`, `n_max` | agentic passes per conversation | 2–3 typical, 6 hard cap |
+| `N_sess` | peak concurrent open sessions | ~750 |
+| `S_max` | response-time ceiling | 8 s (SLA band 2–8 s) |
+
+**Assumed here — the free parameters the specification did not supply.** Each is Appendix A in `PLATFORM_REPORT.md`:
+
+| Symbol | Meaning | Value | Appx |
+|---|---|---|---|
+| `P` | peak factor over average | 3.5× | 1 |
+| `n̄` | mean passes per conversation | 2.5 | 2 |
+| `o₁,o₂,o₃` | output tokens per pass | 150 / 150 / 700 | 3 |
+| `ρ` | prefill saved by prefix cache | 0.50 | 4 |
+| `r_b` | per-stream decode rate at batch `b` | 260 tok/s @ b=12 (H200) | 5 |
+| `β` | H200÷H100 decode scaling | 1.43 | 5b |
+| `L, H_kv, d_head, q` | layers, KV heads, head dim, bytes/elem | 48, 4, 128, 1 (FP8) | 6 |
+| `W_dec` | decode wall-time per conversation | ~5 s | 7 |
+| `μ` | training MFU | 0.40 | 9 |
+| `h` | hours per month | 730 | 12 |
+
+**Hardware constants (H200 SXM):** `V` = 141 GB VRAM · `BW` = 4.8 TB/s · `M` = 35 GB FP8 weights · `O` = 8 GB runtime overhead · `ctx` = 8,192 tokens.
+
+### 2.1.2 Demand
+
+```
+C_day  = U · c                        = 30,000 conversations/day
+λ_avg  = C_day / 86,400               = 0.35 conv/s
+λ_peak = λ_avg · P                    = 1.2 conv/s
+D_conv = o₁ + o₂ + o₃                 = 1,000 decode tok/conversation
+D_day  = C_day · D_conv               = 30 M decode tok/day
+d_peak = (D_day / 86,400) · P         = ~1,200 decode tok/s at peak
+F_raw  = Σ cumulative pass inputs     = 10,200 prefill tok/conversation
+F_eff  = F_raw · (1 − ρ)              = ~5,000 prefill tok/conversation
+```
+
+Prefill grows **quadratically** in pass count (each pass re-sends the accumulated context) while decode grows **linearly**. This is why the prefix cache is load-bearing rather than an optimisation, and why the iteration cap bounds cost but not latency.
+
+### 2.1.3 Memory and capacity
+
+```
+kv_tok    = 2 · L · H_kv · d_head · q
+          = 2 · 48 · 4 · 128 · 1 B          = 49,152 B = 48 KiB/token
+kv_stream = kv_tok · ctx                    = 384 MB per 8K-context stream
+slots     = (V − M − O) / kv_stream
+          = (141 − 35 − 8) / 0.384          = ~255 streams per replica
+```
+
+### 2.1.4 Concurrency
+
+```
+L_stream = λ_peak · W_dec          (Little's Law)
+b        = L_stream / R_active     (batch per replica)
+```
+
+### 2.1.5 Latency
+
+```
+E2E(n) = Σᵢ (inputᵢ / r_prefill)  +  Σᵢ (oᵢ / r_b)  +  (n−1)·t_tool  +  t_orch
+
+with r_prefill ≈ 25,000 tok/s, t_tool = 0.15 s, t_orch = 0.30 s
+```
+
+`r_prefill` is **not** scaled by `β`. H200 and H100 share the GH100 die and the same ~1,979 TFLOPS FP8 peak; only HBM changed. Prefill is compute-bound and gains nothing. Decode reads ~3 GB of weights per token and is bandwidth-bound, so it takes the full `β = 4.8 ÷ 3.35`. **Every latency improvement in §4 comes from the decode terms alone** — if a benchmark shows prefill speeding up too, the configuration under test is not the one modelled here.
+
+### 2.1.6 Cost
+
+```
+$/month = rate_hr · h                 $/year = rate_hr · 8,760
+$/conversation = annual_total / (C_day · 365)
+```
+
+### 2.1.7 Constraints the design must satisfy
+
+| # | Constraint | Status |
+|---|---|---|
+| C1 | `M + O + b · kv_stream ≤ V` — memory fits | ✓ 35 + 8 + 12×0.384 = 47.6 of 141 GB |
+| C2 | `R_active · aggregate_decode ≥ d_peak` — throughput clears | ✓ 1 replica suffices (~2,900 tok/s vs ~1,200) |
+| C3 | `E2E(n̄) ≤ S_max` — typical case meets SLA | ✓ ~4.6 s vs 8 s |
+| C4 | `E2E(n_max) ≤ S_max` — worst case meets SLA | ✓ ~7.0 s — **~1 s margin only** |
+| C5 | `R_total = R_active + 1` — N+1 standby | ✓ 2 active + 1 standby |
+
+**C2 is satisfied ~2.4× over; C4 is the binding constraint.** That is the whole reason the design is latency-sized rather than throughput-sized, and the reason a wall-clock deadline is retained even though C4 now passes unaided.
+
+### 2.1.8 Open item — the concurrency figure does not follow from the stated arrival rate
+
+Applying §2.1.4 literally to the numbers in §2:
+
+```
+L_stream = λ_peak · W_dec = 1.2/s × 5 s ≈ 6 concurrent decoding streams
+```
+
+**The sizing tables in §4.2 use ~25, not ~6.** The gap is roughly 4× and it is not derived anywhere. Three readings are possible:
+
+| Reading | Denominator for `λ_avg` | `L_stream` |
+|---|---|---|
+| As written in §2 | 86,400 s (24 h uniform) | **~6** |
+| Concentrated in an 8-hour business day | 28,800 s | ~18 |
+| Concentrated in ~6 hours | ~21,000 s | ~25 |
+
+The third is what reproduces the figure in use, which suggests the ~25 was reasoned from a business-hours load profile that never made it into the §2 table. **The tables have deliberately not been changed**, because the discrepancy runs in the safe direction: fewer concurrent streams means smaller batches, higher per-stream decode, and *better* latency than modelled. Sizing at ~25 is conservative; sizing at ~6 would be optimistic.
+
+Two things follow, and both should be settled before the numbers are treated as final:
+
+1. **Pin the real load profile.** If traffic is genuinely concentrated in a business day, §2's 24-hour `λ_avg` understates peak arrival and should be restated on the business-hours basis — the peak-factor assumption (Appx 1) is doing work it was not defined to do.
+2. **Measure `W_dec` and `L_stream` directly** under production-shaped traffic. Both are single measurements and they collapse this entire question.
+
+If the true figure is nearer 6 than 25, the latency margins in §4 improve further and the case for 2 active replicas rests entirely on N+1 availability rather than on p99 — which would be worth knowing explicitly rather than by accident.
 
 ---
 
@@ -396,6 +519,7 @@ Full cost tables in `PLATFORM_REPORT.md` §8 and §10.2.
 4. **Whether graph weight calculation is incremental or global** — 8 vCPU supports the former, not the latter at scale (§6.3).
 5. **Confirmation that "pre-training" means continued/domain-adaptive** (§8.2).
 6. **Region and reserved-capacity strategy** — p5e / p5 / p6 availability varies by region and materially affects cost and lead time. `p5e` is the scarcer SKU.
+7. **The load profile and the concurrency figure** — §2.1.8. The ~25 streams used for batch sizing does not follow from §2's stated arrival rate; it implies a business-hours load profile that is not written down.
 7. **The `p5e` 3-year reserved rate**, confirmed directly with AWS rather than derived from p5's discount ratio (§8.4).
 
 ---
@@ -432,6 +556,8 @@ Full cost tables in `PLATFORM_REPORT.md` §8 and §10.2.
 - [ ] **Measure the 6-iteration worst case specifically** — modelled at ~7.0 s with ~1 s of margin; this is the tail that used to breach
 - [ ] **Verify single-replica operation holds the SLA** (~6.7 s modelled) — it is the basis for treating maintenance and failover as non-SLA events
 - [ ] Measure the real prefix-cache hit rate under agentic traffic (assumed ~50% prefill saving)
+- [ ] **Measure `W_dec` and concurrent decoding streams under production-shaped traffic** — resolves the 6-vs-25 gap in §2.1.8 and validates every batch size in §4.2
+- [ ] **Confirm the daily load profile** — 24-hour uniform or concentrated business hours. §2 assumes uniform; the concurrency figure in use implies concentration (§2.1.8)
 - [ ] Measure the actual distribution of iterations per conversation (assumed avg 2.5, cap 6) — if the tail is fatter than modelled, §4.1's deadline mechanism carries the SLA
 - [ ] Confirm SSE streaming delivers TTFT under ~3 s (modelled ~1.9 s on H200)
 - [ ] Load-test knowledge-graph ingestion at 12 writes/s with weight calculation running concurrently on 8 vCPU
