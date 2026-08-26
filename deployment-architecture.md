@@ -110,7 +110,7 @@ flowchart TB
 | Knowledge graph | Neptune `db.r6g.2xlarge`, or Neo4j on `r7g.2xlarge` | ~110 M nodes/yr, ~45 GB/yr |
 | Graph ingestion worker | `c7g.2xlarge` (8 vCPU) | Edge-weight calculation, ~12 writes/s |
 | ML result cache | DynamoDB + native TTL | Read-only for the LLM |
-| Scheduled analytics pipeline | **Not yet sized** — `g6.4xlarge` placeholder | Clustering → whitening/PCA → ICA → ~156 parametric time-series models. CPU/BLAS work; see `reference/SYSTEM_REQUIREMENTS.md` §6.2 |
+| Scheduled analytics pipeline | **Not yet sized** — `g6.4xlarge` placeholder | Clustering → whitening/PCA → ICA → ~156 parametric time-series models. CPU/BLAS work; see `PLATFORM_REPORT.md` §7 |
 
 ---
 
@@ -208,7 +208,7 @@ flowchart LR
 - **1× `p5e.48xlarge`** carries live (3 GPUs) + canary (1 GPU), 4 spare for training
 - Price against **Capacity Blocks / Savings Plans** — on-demand p5e is the worst rate
 - **$311,089/yr all-in on a 3-year commit** · $0.0284 per conversation · $8.64 per user/month
-- Scheduled analytics pipeline (~156 time-series models) is **CPU work, not GPU** — sizing provisional, see `reference/SYSTEM_REQUIREMENTS.md` §6.2
+- Mathematical-model workload (~156 time-series models) is **CPU work, not GPU** — sizing provisional, see `PLATFORM_REPORT.md` §7
 - `c7g.2xlarge` is the 8 vCPU graph weight worker
 - Data tier is small: ~220 GB/yr Postgres, ~500 GB/yr vector, ~45 GB/yr graph
 

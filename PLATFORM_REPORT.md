@@ -30,7 +30,7 @@ A self-hosted platform serving **Qwen/Qwen3.6-35B-A3B** on SGLang to 3,000 daily
 
 1. **The model is Mixture-of-Experts (35B total, ~3B active).** VRAM is sized by total parameters, but compute and bandwidth by active parameters. Decode runs ~4–5× faster than a dense 35B and each replica fits on **one** GPU instead of two. This halved the GPU fleet from 6 to 3.
 
-2. **H200 rather than H100, and the reason is the SLA — not the memory.** H200 is the same compute die with 141 GB of HBM3e at 4.8 TB/s instead of 80 GB at 3.35 TB/s. Decode is bandwidth-bound, so it runs **~1.43× faster**: ~4.6 s end-to-end instead of ~6.4 s, and ~255 KV slots per replica instead of ~96. On a 3-year commitment that costs **$31,247/year more — about 15%**. See §10.2.
+2. **H200 rather than H100, and the reason is the SLA — not the memory.** H200 is the same compute die with 141 GB of HBM3e at 4.8 TB/s instead of 80 GB at 3.35 TB/s. Decode is bandwidth-bound, so it runs **~1.43× faster**: ~4.6 s end-to-end instead of ~6.4 s, and ~255 KV slots per replica instead of ~96. On a 3-year commitment that costs **$31,247/year more — about 15%**. See §11.2.
 
 3. **Concurrent sessions are not GPU streams.** By Little's Law only **~25 sessions are actually generating** at peak, out of 750 open. Sizing GPUs against the session count would over-provision by an order of magnitude — which is why revising the session target from 2,000 down to 750 does not change the GPU bill at all.
 
@@ -40,8 +40,8 @@ A self-hosted platform serving **Qwen/Qwen3.6-35B-A3B** on SGLang to 3,000 daily
 
 ### Two decisions required before procurement
 
-- **Confirm "pre-training" means domain-adaptive continued pre-training**, not training a base model from scratch. From-scratch is not feasible on the proposed hardware — see §7.2.
-- **Confirm self-hosting is being chosen for capability, not cost.** At this volume a commercial API would be roughly 4× cheaper. The premium buys model ownership and the RL loop — which the requirements describe as core. See §9.
+- **Confirm "pre-training" means domain-adaptive continued pre-training**, not training a base model from scratch. From-scratch is not feasible on the proposed hardware — see §8.2.
+- **Confirm self-hosting is being chosen for capability, not cost.** At this volume a commercial API would be roughly 4× cheaper. The premium buys model ownership and the RL loop — which the requirements describe as core. See §10.
 
 ---
 
@@ -66,7 +66,7 @@ A self-hosted platform serving **Qwen/Qwen3.6-35B-A3B** on SGLang to 3,000 daily
 | Response time SLA | **2–8 seconds** |
 | Cloud | AWS |
 | RL / pre-training hardware | 1× H200 or 1× B200 |
-| Dedicated ML model | 16 GB VRAM / 64 GB RAM / 16 vCPU, runs on a fixed frequency, results cached. **Now understood to be an analytics pipeline feeding ~156+ time-series models — see §6.2, not yet specified** |
+| Dedicated ML model | 16 GB VRAM / 64 GB RAM / 16 vCPU, runs on a fixed frequency, results cached. **Now understood to be an analytics pipeline feeding ~156+ time-series models — see §7, not yet specified** |
 | Knowledge graph | Full graph, continuous ingestion, +8 vCPU for weight calculation |
 
 ---
@@ -234,7 +234,7 @@ At 3,000 DAU the data tier is small. Do not over-provision — but keep a horizo
 | RDS PostgreSQL | Users, auth, chat history | ~600 MB/day → **~220 GB/yr**, ~5 QPS. No sharding needed. |
 | Vector DB | RAG + semantic memory | ~600 MB/day → **~500 GB/yr** with index overhead |
 | Knowledge Graph | Full graph, continuous ingestion | ~300k nodes + 600k edges/day → **~110 M nodes/yr, ~45 GB/yr** |
-| DynamoDB | Scheduled ML model results | Small; native TTL |
+| DynamoDB | Mathematical-model results (§7) | Small; native TTL |
 | S3 | Checkpoints | 35 GB per FP8 checkpoint; 50 retained ≈ **2 TB** |
 
 ### 6.1 Knowledge graph — two cautions
@@ -243,23 +243,126 @@ At 3,000 DAU the data tier is small. Do not over-provision — but keep a horizo
 
 > **A continuously ingesting graph with no retention policy grows without bound.** Add decay, pruning, or entity consolidation from day one. Retrofitting it onto a 200-million-edge graph is painful.
 
-### 6.2 The scheduled analytics pipeline is not yet sized
+---
 
-The "dedicated ML model" in §1 is understood to be not one model but a **multivariate pipeline — clustering, whitening, PCA, a modelling stage, ICA — feeding on the order of 156+ parametric time-series models.** It runs on a schedule and writes to a cache, so it is off the request path and does not touch the latency budget in §4.
+## 7. The mathematical-model workload
 
-Three things follow, and only the first is settled:
+The platform runs a second, entirely separate workload alongside the LLM: a **multivariate analytics pipeline feeding on the order of 156+ parametric time-series models.** This is the "dedicated ML model" of §1, and treating it as one model understated it considerably.
 
-1. **It is CPU work, not GPU work.** Clustering, eigendecomposition, ICA, and ARIMA/GARCH/VAR fitting are all LAPACK/BLAS and numerical optimisation. Nothing consumes VRAM. The current line item is a `g6.4xlarge`, chosen for its L4 to match the stated "16 GB VRAM" — **if the pipeline is the whole workload, that GPU is dead weight** and a compute-optimised `c7i.4xlarge` does the same job at roughly half the rate. If something else in the workload genuinely needs 16 GB of VRAM, the GPU stays and the pipeline rides along for free. **Ask which.**
+It runs on a fixed schedule, writes its output to a cache, and the LLM reads that cache through an MCP tool. **It is not on the request path**, so nothing in this section affects the latency budget in §4 or the GPU sizing in §3.
 
-2. **The cost is unsized, and honestly so.** Without the data dimensions, model count semantics, and refit cadence, the plausible range runs from under $100/month to a dedicated always-on instance. An illustrative worked example in `reference/SYSTEM_REQUIREMENTS.md` §6.2.3 — 100k observations, 500 series, 156 fits — comes out at **~3 minutes of wall-clock per run**, which would make the current ~4 h/day assumption an order of magnitude too generous. But that example's inputs are invented. The sensitivity is almost entirely in the number of input series and the per-fit optimiser time.
+### 7.1 The pipeline
 
-3. **The pipeline ordering as described needs confirmation.** Whitening and PCA are normally one eigendecomposition, not two stages; and ICA conventionally runs *before* downstream modelling, since it requires whitened, reduced input. "Modelling then ICA" may mean ICA on model residuals — a real technique — but it should be confirmed rather than assumed. See §6.2.2 of the engineering detail.
+```
+raw series → clustering → whitening → PCA → [modelling] → ICA → ~156 parametric
+                                                                 time-series models
+                                                                        ↓
+                                                            DynamoDB result cache
+                                                                        ↓
+                                                            MCP tool → LLM
+```
 
-> **This does not threaten the headline number.** Even a generous reading of this workload is small against $311,089/year, and it has four spare H200s and 192 vCPU on the existing instance to fall back on if it turns out to be heavier than expected. But it should not continue to be carried as a $159/month guess. **Nine specific inputs would close it — listed in `reference/SYSTEM_REQUIREMENTS.md` §6.2.4.**
+| Stage | What it does | Kernel |
+|---|---|---|
+| Clustering | segments series into groups before decomposition | k-means / hierarchical |
+| Whitening | decorrelates and normalises to unit variance | eigendecomposition or Cholesky |
+| PCA | reduces dimension, retains `k` components | SVD / eigendecomposition |
+| *modelling* | **unspecified — see §7.3** | — |
+| ICA | separates statistically independent sources | FastICA / Infomax |
+| Time-series models | ~156 parametric fits on the resulting components | MLE, quasi-Newton, Kalman |
+
+"Parametric time-series models" most likely spans ARIMA/SARIMA, the GARCH family, VAR/VECM, exponential smoothing (ETS), and state-space models. **Which family dominates matters more than the count** — 156 univariate ARIMA fits are cheap and embarrassingly parallel; a VAR on 156 jointly-modelled series is `O(k³p³)` in the solve and behaves nothing like them.
+
+### 7.2 It is CPU work, and that is the main finding
+
+Every stage above is dense linear algebra or numerical optimisation over LAPACK/BLAS. **None of it consumes VRAM.**
+
+The current line item is a `g6.4xlarge`, chosen because its L4 gives 24 GB of VRAM against the "16 GB VRAM" written into the original spec. If this pipeline is the whole workload, **that GPU is dead weight** — a compute-optimised `c7i.4xlarge` (16 vCPU / 32 GB, ~$0.71/hr) does the same job at roughly half the rate, with better per-core BLAS throughput.
+
+Two readings, and they should be resolved explicitly:
+
+- **The pipeline is the whole workload** → drop the GPU, move to a CPU instance, save ~$80/month.
+- **Something else needs the 16 GB VRAM** — a neural forecaster, an embedding model, a deep state-space model → the GPU stays, and the classical pipeline rides along on the same box for free.
+
+The saving is small. The reason to ask is that it determines whether this workload is GPU-contended with serving, which matters for capacity planning well beyond $80/month.
+
+### 7.3 Two things about the pipeline that need confirming
+
+**Whitening and PCA are normally the same operation.** Both fall out of a single eigendecomposition of the covariance matrix — PCA whitening is projection onto the components followed by scaling to unit variance. Listing them as separate stages usually means one decomposition, not two. The cost model in §7.4 counts it once.
+
+**ICA conventionally runs *before* the downstream modelling, not after.** FastICA and Infomax both require whitened, dimension-reduced input as a precondition — that is what a PCA stage is normally *for*. An "ICA after modelling" step is unusual. It may mean **ICA on model residuals**, which is a legitimate technique for separating common shocks from idiosyncratic ones, but it is not the same computation and it is not costed the same way. **This is the one stage with no complexity estimate below**, because it is not yet clear what it is.
+
+### 7.4 Cost model
+
+Let `n` = observations per series, `d` = raw series, `k` = retained components, `c` = clusters, `M` = fitted models (~156), `R` = refits per day.
+
+```
+Covariance + eigendecomposition   O(n·d² + d³)      ← whitening and PCA together
+Clustering (k-means, i iters)     O(i·n·c·d)
+ICA (FastICA, j iters, k dims)    O(j·n·k²)
+Time-series fits                  M · O(iters · n)   ← wall-clock is optimiser-bound
+Peak memory                       ~8·n·d bytes (float64) + O(d²) covariance
+
+Run wall-clock ≈ linear-algebra terms / effective FLOPS
+               + (M · t_fit) / parallel workers
+Monthly cost   ≈ rate_hr · run_hr · R · 30
+```
+
+**Illustrative only — these inputs are invented to show the shape of the answer, not to predict it.** At `n` = 100,000, `d` = 500, `k` = 50, `c` = 20, `M` = 156, on 16 vCPU:
+
+| Term | Estimate |
+|---|---|
+| Covariance + eigendecomposition | ~2.5×10¹⁰ flops → **<1 s** |
+| Clustering | ~5×10⁹ flops → **~0.1 s** |
+| ICA | ~2.5×10¹⁰ flops → **<1 s** |
+| 156 MLE fits @ ~10 s each | ~26 min serial → **~2 min across 16 cores** |
+| Design matrix in memory | **400 MB** |
+| **Run wall-clock** | **~3 minutes** |
+
+If that shape holds, the workload is **minutes per run, not hours** — and the ~4 h/day currently assumed (Appendix A #10) is an order of magnitude too generous, meaning the line is *over*-provisioned rather than under.
+
+**The sensitivity is severe, and it sits almost entirely in `d` and `t_fit`:**
+
+| Change | Effect |
+|---|---|
+| `d`: 500 → 5,000 | covariance term ×100; memory 400 MB → 4 GB |
+| `d`: 500 → 50,000 | memory → **40 GB**, against a 64 GB box. Needs randomised/truncated PCA |
+| `t_fit`: 10 s → 120 s (GARCH, slow optimiser) | 156 fits → ~20 min on 16 cores |
+| `R`: daily → hourly | ×24 on compute, and the staleness policy becomes load-bearing |
+| Family: 156 univariate → one VAR on 156 series | different algorithm entirely; `O(k³p³)` solve |
+
+**This is why the section carries no number.** Across plausible readings the line moves from under $100/month to a dedicated always-on instance — a ~20× spread on a line that is currently a $159 placeholder.
+
+### 7.5 Operational requirements that come with 156 models
+
+Model *count* creates obligations that model *cost* does not. None of these are sized yet:
+
+- **Configuration and versioning.** 156 model specifications — orders, lag structures, priors, transformations — need to live somewhere versioned, not in code. The S3 model registry in §8 is built for LLM checkpoints; whether it also holds these configs is an open question.
+- **Fit provenance.** Which data window produced which fitted parameters, and when. Without it, a forecast that looks wrong cannot be traced back to the fit that produced it.
+- **Convergence monitoring.** MLE fits fail to converge, and they do so silently. At 156 models per run, nobody will notice by inspection — this needs an automated per-model convergence and diagnostic check, with results surfaced alongside the forecasts.
+- **Backtesting and drift.** Parametric time-series models degrade as regimes shift. A refit cadence is not the same thing as a validation cadence, and the requirements specify neither.
+- **Partial-failure policy.** If 12 of 156 models fail to fit, does the run publish, publish partially, or abort? The LLM reads a cache — it needs to know whether what it reads is complete.
+
+### 7.6 What is needed to size it
+
+1. **`n` and `d`** — observations per series, and how many series enter. Memory first, compute second.
+2. **`k`** — components retained after PCA, fixed or variance-threshold selected.
+3. **What "156 models" counts** — fitted models, output series, or configurations swept. These size very differently.
+4. **Model family per fit** — ARIMA, GARCH, VAR, state-space, or mixed.
+5. **Refit cadence versus inference cadence.** Refitting parameters is the expensive part; applying fitted models to new data is nearly free. The two are often conflated into a single "run frequency".
+6. **Whether all 156 refit every run**, or on a rolling/staggered schedule. Staggering flattens the peak and shrinks the instance.
+7. **What the "modelling" stage between PCA and ICA is** — §7.3.
+8. **Whether any stage needs a GPU** — §7.2.
+9. **Cache and staleness policy** — run frequency, maximum acceptable result age, and cache-miss behaviour (serve stale / trigger on-demand / return unavailable; the last is usually correct for a latency-bound system).
+
+> **This does not threaten the headline number.** Even a generous reading is small against $311,089/year, and the existing instance carries four spare H200s and 192 vCPU to absorb it if it proves heavier than expected. But it should be sized rather than guessed, and the operational obligations in §7.5 are real work that is not currently in any estimate.
+
+Engineering detail, including the full derivation, is in `reference/SYSTEM_REQUIREMENTS.md` §7.
 
 ---
 
-## 7. Training pipeline
+
+## 8. Training pipeline
 
 ```
 Pre-training → Post-training (RL) → S3 Model Registry
@@ -269,7 +372,7 @@ Pre-training → Post-training (RL) → S3 Model Registry
                      ↳ production traces + reward signal feed back into RL
 ```
 
-### 7.1 RL post-training on one GPU
+### 8.1 RL post-training on one GPU
 
 | Approach | Policy | Reference | Grads | Optimizer | Activations | **Total** | H200 141 GB | B200 180 GB |
 |---|---|---|---|---|---|---|---|---|
@@ -291,7 +394,7 @@ Two terms drive that table:
 
 *Throughput (RL is rollout-generation-bound):* **~600–1,200 GRPO steps/day on H200**, ~1,000–2,000 on B200. Sufficient for continuous incremental RL from production traces; not for a from-scratch alignment campaign.
 
-### 7.2 Pre-training on one GPU
+### 8.2 Pre-training on one GPU
 
 | Scenario | Memory | Time on 1 GPU | Verdict |
 |---|---|---|---|
@@ -309,7 +412,7 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 
 > **Decision required:** confirm "pre-training" means domain-adaptive continued pre-training. Training a base model from scratch needs hundreds of GPUs and a fundamentally different budget.
 
-### 7.3 Hot-swap and the promotion gate
+### 8.3 Hot-swap and the promotion gate
 
 - **Preferred:** SGLang's live weight-update path (`update_weights_from_disk` / distributed weight sync). Weights replaced in-place in a running server; connections stay open, no cold start.
 - **Fallback:** blue/green drain through the inference load balancer with automatic rollback.
@@ -319,11 +422,11 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 
 ---
 
-## 8. Cost breakdown
+## 9. Cost breakdown
 
-**Pricing basis:** AWS us-east-1, Linux, August 2026. The GPU on-demand rate is verified against published sources (see Sources); **the 3-year reserved rate is derived, not quoted — see the note in §8.1.** Non-GPU rates are list-price estimates and should be confirmed in the AWS Pricing Calculator before a purchase order. Prices exclude taxes, support plans, and engineering effort. AWS raised H200 instance rates ~15% during 2025, so re-verify at purchase rather than relying on this document.
+**Pricing basis:** AWS us-east-1, Linux, August 2026. The GPU on-demand rate is verified against published sources (see Sources); **the 3-year reserved rate is derived, not quoted — see the note in §9.1.** Non-GPU rates are list-price estimates and should be confirmed in the AWS Pricing Calculator before a purchase order. Prices exclude taxes, support plans, and engineering effort. AWS raised H200 instance rates ~15% during 2025, so re-verify at purchase rather than relying on this document.
 
-### 8.1 GPU tier — one instance, fully allocated
+### 9.1 GPU tier — one instance, fully allocated
 
 `p5e.48xlarge` — 8× NVIDIA H200 141 GB HBM3e (4.8 TB/s), 192 vCPU, 2,048 GiB RAM. `p5en.48xlarge` is the same GPUs on an Emerald Rapids host with EFAv3 networking; it prices slightly differently and is the SKU with the most reliable published rate.
 
@@ -343,11 +446,11 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 
 **The 3-year commitment saves ~57% — $314,940/year.** This is by far the largest single lever in the entire budget.
 
-> **The 3-year rate is derived, not quoted, and it is the number to verify first.** AWS publishes a verified 3-year reserved rate for `p5.48xlarge` ($23.777/hr, which is 43.2% of its $55.040 on-demand rate) but does not publish an equivalent open rate for `p5e`. The $27.344/hr above applies that same 43.2% ratio to the p5e on-demand rate. **Confirm it directly with AWS or through the Pricing Calculator before issuing a purchase order** — it carries roughly $240k/year, and a materially worse discount ratio would change the H200-vs-H100 comparison in §10.2.
+> **The 3-year rate is derived, not quoted, and it is the number to verify first.** AWS publishes a verified 3-year reserved rate for `p5.48xlarge` ($23.777/hr, which is 43.2% of its $55.040 on-demand rate) but does not publish an equivalent open rate for `p5e`. The $27.344/hr above applies that same 43.2% ratio to the p5e on-demand rate. **Confirm it directly with AWS or through the Pricing Calculator before issuing a purchase order** — it carries roughly $240k/year, and a materially worse discount ratio would change the H200-vs-H100 comparison in §11.2.
 
 *An idle GPU on this instance costs ~$7.91/hour on-demand. The allocation above exists so none sits idle.*
 
-### 8.2 Non-GPU compute
+### 9.2 Non-GPU compute
 
 | Component | Instance | ~$/hr | Qty | $/month |
 |---|---|---|---|---|
@@ -356,12 +459,12 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 | Auth service | `m7g.large` | 0.082 | 2 | $120 |
 | Graph ingestion worker (8 vCPU) | `c7g.2xlarge` | 0.290 | 1 | $212 |
 | Vector DB (self-hosted) | `r7g.xlarge` | 0.214 | 3 | $469 |
-| Scheduled analytics pipeline *(provisional — §6.2)* | `g6.4xlarge` | 1.323 | ~4 h/day | $159 |
+| Scheduled analytics pipeline *(provisional — §7)* | `g6.4xlarge` | 1.323 | ~4 h/day | $159 |
 | | | | **Subtotal** | **~$1,912** |
 
-*The analytics-pipeline line is a placeholder, not an estimate — see §6.2. It could plausibly fall (CPU instance, minutes per run instead of hours) or rise (high-dimensional input, hourly refits). Either way it is small against the GPU tier, and the existing instance has spare capacity to absorb it.*
+*The analytics-pipeline line is a placeholder, not an estimate — see §7. It could plausibly fall (CPU instance, minutes per run instead of hours) or rise (high-dimensional input, hourly refits). Either way it is small against the GPU tier, and the existing instance has spare capacity to absorb it.*
 
-### 8.3 Managed services and storage
+### 9.3 Managed services and storage
 
 | Service | Configuration | $/month |
 |---|---|---|
@@ -376,7 +479,7 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 | SQS | 75k messages/day | ~$1 |
 | | **Subtotal** | **~$4,051** |
 
-### 8.4 Totals
+### 9.4 Totals
 
 | | Monthly | Annual |
 |---|---|---|
@@ -395,7 +498,7 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 
 *Non-GPU compute and managed services are unaffected by the GPU choice — the entire H100 → H200 delta lands in the GPU line.*
 
-### 8.5 Unit economics
+### 9.5 Unit economics
 
 | Metric | On-demand | 1-yr SP | **3-yr Reserved** |
 |---|---|---|---|
@@ -405,7 +508,7 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 
 *H100 equivalents for comparison: $0.0256 per conversation and $7.77 per user per month on a 3-year commit. The H200 premium is **$0.0028 per conversation** — about a quarter of a cent — in exchange for ~1.8 s of response time.*
 
-### 8.6 Three-year total cost of ownership
+### 9.6 Three-year total cost of ownership
 
 | | 3-yr Reserved |
 |---|---|
@@ -420,7 +523,7 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 
 ---
 
-## 9. Build vs. buy — an honest comparison
+## 10. Build vs. buy — an honest comparison
 
 At 10,200 input + 1,000 output tokens per conversation, and representative commercial API pricing of ~$0.50 per million input / ~$1.50 per million output tokens:
 
@@ -454,21 +557,21 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 
 ---
 
-## 10. Cost optimisation levers, ranked
+## 11. Cost optimisation levers, ranked
 
 | # | Lever | Saving | Notes |
 |---|---|---|---|
-| 1 | **3-year Reserved / Savings Plan** | **~$315k/yr (57%)** | Largest lever by an order of magnitude. Requires a 3-year commitment, and the p5e reserved rate must be confirmed with AWS (§8.1). |
+| 1 | **3-year Reserved / Savings Plan** | **~$315k/yr (57%)** | Largest lever by an order of magnitude. Requires a 3-year commitment, and the p5e reserved rate must be confirmed with AWS (§9.1). |
 | 2 | **Keep all 8 GPUs allocated** | ~$7.91/GPU/hr avoided | Already in the plan — training uses the spare 4 rather than a second instance. |
 | 3 | Self-host graph DB instead of Neptune | ~$1,200/mo | Neo4j on `r7g.2xlarge` ≈ $500/mo vs Neptune ≈ $1,700. Adds operational burden. |
 | 4 | INT4 quantisation | Possibly 1 replica | Halves weight memory, more KV headroom. Quality tax must be benchmarked first. |
 | 5 | Parallel tool dispatch | GPU-seconds + latency | Fewer passes per conversation cuts both cost and response time. |
 | 6 | Aggressive prefix caching | ~50% of prefill | Already core to the design; protect it with prefix-affinity routing. |
 | 7 | Canary only during release windows | Frees 1 GPU | No direct saving (same instance) but adds training capacity. |
-| 8 | **Downgrade to H100 (`p5.48xlarge`)** | **~$31k/yr (10%)** | Real, but it spends the SLA margin the H200 was bought for. See §10.2 before taking it. |
+| 8 | **Downgrade to H100 (`p5.48xlarge`)** | **~$31k/yr (10%)** | Real, but it spends the SLA margin the H200 was bought for. See §11.2 before taking it. |
 | 9 | Spot for RL / continued pre-training | Situational | Only helps if training moves off the p5e — but AWS sells no single H200, so a separate instance would cost far more than it saves. |
 
-### 10.1 Options considered and rejected
+### 11.1 Options considered and rejected
 
 | Option | Why rejected |
 |---|---|
@@ -478,7 +581,7 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 | BF16 serving | On H200 this now fits — 70 GB weights leaves ~63 GB for KV, ~164 streams at TP=1, where on H100 it left ~2 GB and was impossible. It is still rejected, but on **bandwidth**: BF16 reads twice the bytes per token, cutting decode to ~130 tok/s at batch 12 and pushing end-to-end back to ~8.5 s. FP8 is the correct precision on H200 for speed, not for capacity. |
 | B200 (`p6-b200.48xlarge`) for serving | ~8.0 TB/s would decode ~1.7× faster again, but the SLA is already met with ~3.4 s of slack at a materially lower rate. Worth revisiting only if context lengths or pass counts grow substantially. |
 
-### 10.2 The H200 decision, and the H100 downgrade option
+### 11.2 The H200 decision, and the H100 downgrade option
 
 `p5e` (H200) is the recommendation. `p5` (H100) remains a legitimate cheaper alternative, so the comparison is set out in full:
 
@@ -507,23 +610,23 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 
 **When to take the H100 downgrade instead:** if $31k/year is material to the business case, *and* the 6-iteration tail is measured to be rare, *and* the wall-clock deadline is implemented and tested. It is a defensible trade — but it should be a deliberate one, made after benchmarking, not a default.
 
-> **Verify the p5e reserved rate before treating the 15% figure as firm** (§8.1). It is derived from p5's discount ratio, not quoted by AWS. If the real p5e reserved discount is worse, the delta widens and this comparison should be re-run.
+> **Verify the p5e reserved rate before treating the 15% figure as firm** (§9.1). It is derived from p5's discount ratio, not quoted by AWS. If the real p5e reserved discount is worse, the delta widens and this comparison should be re-run.
 
 ---
 
-## 11. Risks and open items
+## 12. Risks and open items
 
 ### Decisions required before procurement
 
-1. **Confirm "pre-training" scope** (§7.2). From-scratch is not feasible; domain-adaptive continued pre-training is.
-2. **Confirm the build-vs-buy premium is accepted** (§9), and that the RL loop justifies it.
+1. **Confirm "pre-training" scope** (§8.2). From-scratch is not feasible; domain-adaptive continued pre-training is.
+2. **Confirm the build-vs-buy premium is accepted** (§10), and that the RL loop justifies it.
 3. **Region and capacity strategy.** `p5e` availability is thinner than `p5` in several regions. **Securing H200 supply is a lead-time risk, not only a cost question** — evaluate EC2 Capacity Blocks for ML early, and confirm p5e or p5en availability in the target region before the design depends on it.
-4. **Confirm the `p5e` 3-year reserved rate with AWS** (§8.1). It is derived rather than quoted and carries ~$240k/year.
+4. **Confirm the `p5e` 3-year reserved rate with AWS** (§9.1). It is derived rather than quoted and carries ~$240k/year.
 
 ### Needed to finalise sizing
 
 5. **Exact Qwen3.6-35B-A3B config** — layer count, KV heads, head_dim, expert count. The KV math in §3.2 assumes a Qwen3-30B-A3B-class shape.
-6. **The analytics pipeline (§6.2) — the largest unsized item in this report.** Nine inputs are needed, listed in `reference/SYSTEM_REQUIREMENTS.md` §6.2.4: data dimensions (`n`, `d`, `k`), what the "156 models" actually counts, the model family per fit, refit versus inference cadence, whether all fits refresh every run, what the "modelling" stage between PCA and ICA is, whether any stage needs a GPU, and the cache staleness and miss policy.
+6. **The mathematical-model workload (§7) — the largest unsized item in this report.** Nine inputs are needed, listed in §7.6 and in `reference/SYSTEM_REQUIREMENTS.md` §7.6: data dimensions (`n`, `d`, `k`), what the "156 models" actually counts, the model family per fit, refit versus inference cadence, whether all fits refresh every run, what the "modelling" stage between PCA and ICA is, whether any stage needs a GPU, and the cache staleness and miss policy.
 7. **Knowledge-graph extraction density** — entities and edges per conversation, which drives §6 growth numbers.
 8. **Whether graph weight calculation is incremental or global** — 8 vCPU supports the former, not the latter at scale.
 
@@ -536,20 +639,20 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 | Knowledge graph grows unbounded | Query latency degrades, storage climbs | Retention/decay policy from day one (§6.1) |
 | Training job starves a serving replica | Latency breach | Pin GPUs explicitly; schedule training off-peak. Note training now shares 141 GB cards, so a LoRA job at ~66 GB leaves real headroom rather than filling the device |
 | Prompt injection reaches backend tools | Data exposure | Per-tool scoped tokens; the LLM never holds a superuser credential (§5.2) |
-| RL checkpoint regresses production | Quality incident | Automated eval gate with p99 latency check; no direct RL→prod path (§7.3) |
-| `p5e` capacity unavailable in the target region | Procurement delay | Confirm p5e/p5en availability early; `p5` (H100) remains a working fallback at the SLA cost set out in §10.2 |
-| p5e 3-year reserved rate worse than the derived $27.344/hr | Budget overrun on the largest line | Confirm with AWS before the purchase order (§8.1) |
+| RL checkpoint regresses production | Quality incident | Automated eval gate with p99 latency check; no direct RL→prod path (§8.3) |
+| `p5e` capacity unavailable in the target region | Procurement delay | Confirm p5e/p5en availability early; `p5` (H100) remains a working fallback at the SLA cost set out in §11.2 |
+| p5e 3-year reserved rate worse than the derived $27.344/hr | Budget overrun on the largest line | Confirm with AWS before the purchase order (§9.1) |
 | Concurrency figure (~25 streams) not derived from the stated arrival rate | Batch sizes, and therefore every latency number, rest on an unverified input | Conservative direction — real latency should be better, not worse. Measure directly under production traffic; see `reference/SYSTEM_REQUIREMENTS.md` §2.1.8 |
-| Analytics pipeline (~156 models) materially larger than the $159/mo placeholder | Non-GPU compute line rises; a high-dimensional input could need its own instance | Off the request path, so no SLA exposure. 4 spare GPUs and 192 vCPU already on the instance. Size it properly with §6.2.4 |
-| Analytics pipeline provisioned on a GPU instance it does not use | ~$80/month wasted, and false GPU contention in capacity planning | Confirm whether any stage needs VRAM (§6.2); if not, move to `c7i.4xlarge` |
+| Analytics pipeline (~156 models) materially larger than the $159/mo placeholder | Non-GPU compute line rises; a high-dimensional input could need its own instance | Off the request path, so no SLA exposure. 4 spare GPUs and 192 vCPU already on the instance. Size it properly with §7.6 |
+| Analytics pipeline provisioned on a GPU instance it does not use | ~$80/month wasted, and false GPU contention in capacity planning | Confirm whether any stage needs VRAM (§7.2); if not, move to `c7i.4xlarge` |
 
 ---
 
-## 12. Recommendations
+## 13. Recommendations
 
 1. **Procure one `p5e.48xlarge` (8× H200 141 GB) on a 3-year Reserved commitment** — ~$239,533/year, versus $554,473 on-demand. Allocate all 8 GPUs: 2 live, 1 standby, 1 canary, 4 training.
-2. **Confirm the p5e 3-year reserved rate with AWS before signing** (§8.1). It is derived from p5's discount ratio and carries ~$240k/year. Confirm `p5e`/`p5en` capacity in the target region at the same time.
-3. **Treat `p5` (H100) as the costed fallback, not the default** (§10.2). It saves $31,247/year and gives back ~1.8 s of response time, the 6-iteration margin, and single-replica degraded mode.
+2. **Confirm the p5e 3-year reserved rate with AWS before signing** (§9.1). It is derived from p5's discount ratio and carries ~$240k/year. Confirm `p5e`/`p5en` capacity in the target region at the same time.
+3. **Treat `p5` (H100) as the costed fallback, not the default** (§11.2). It saves $31,247/year and gives back ~1.8 s of response time, the 6-iteration margin, and single-replica degraded mode.
 4. **Serve at FP8, TP=1.** FP8 remains correct on H200 for bandwidth reasons, not memory ones — BF16 now fits on 141 GB but decodes roughly half as fast. Benchmark INT4 separately as a cost tier.
 5. **Implement all three guards** — iteration cap, token budget, and wall-clock deadline. H200 pulls the 6-iteration worst case inside the ceiling, but ~1 s of margin is not a guarantee.
 6. **Stream over SSE** and **dispatch independent tools in parallel**. Both cut perceived latency and GPU-seconds.
@@ -557,20 +660,20 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 8. **Train with LoRA on the spare H200s**, off-peak. This meets the stated "1× H200" requirement exactly, with no separate instance. Full-parameter RL is not viable on one GPU and does not need to be.
 9. **Gate every promotion** on an automated eval suite including p99 latency.
 10. **Set a knowledge-graph retention policy before go-live**, not after.
-11. **Make the build-vs-buy decision explicitly** (§9) before capital is committed.
+11. **Make the build-vs-buy decision explicitly** (§10) before capital is committed.
 
 ---
 
-## 13. Validate before sign-off
+## 14. Validate before sign-off
 
 - [ ] Benchmark Qwen3.6-35B-A3B on a single H200 at FP8 — confirm ~290–360 tok/s single-stream decode and ~255 KV slots at 8K context
-- [ ] **Confirm the ~1.43× decode scaling from H100 empirically.** The entire latency case rests on decode being bandwidth-bound; if the measured gain is materially below 1.43×, re-run §4 and §10.2
+- [ ] **Confirm the ~1.43× decode scaling from H100 empirically.** The entire latency case rests on decode being bandwidth-bound; if the measured gain is materially below 1.43×, re-run §4 and §11.2
 - [ ] **Measure p99 end-to-end latency under peak concurrency against the 8 s ceiling** — this is the acceptance criterion, not throughput
 - [ ] Measure the 6-iteration worst case specifically — modelled at ~7.0 s with ~1 s of margin
 - [ ] Measure the real prefix-cache hit rate under agentic traffic (assumed ~50% prefill saving)
 - [ ] **Measure concurrent decoding streams and decode wall-time under production-shaped traffic** — resolves the ~6-vs-~25 gap (`reference/SYSTEM_REQUIREMENTS.md` §2.1.8) that underpins every batch size and latency figure
 - [ ] **Confirm the daily load profile** — 24-hour uniform, or concentrated into business hours
-- [ ] **Specify the analytics pipeline** against the nine inputs in `reference/SYSTEM_REQUIREMENTS.md` §6.2.4, then re-cost the line in §8.2
+- [ ] **Specify the mathematical-model workload** against the nine inputs in §7.6, then re-cost the line in §9.2
 - [ ] **Time one full pipeline run on representative data** — wall-clock and peak RSS. Settles instance type, run window, and whether a GPU is needed at all
 - [ ] Measure the actual distribution of iterations per conversation (assumed avg 2.5, cap 6)
 - [ ] Confirm SSE streaming delivers time-to-first-token under ~3 s
@@ -592,13 +695,13 @@ Every number in this report derives from the inputs in §1 plus the following. E
 | 3 | Output split across passes | 150 / 150 / 700 tokens | Shifts the latency budget |
 | 4 | Prefix-cache saving on prefill | ~50% | Below this, prefill load rises; a 3rd active replica may be needed |
 | 5 | Per-stream decode at batch 12 (H200) | ~260 tok/s | Directly sets end-to-end latency |
-| 5b | H200 decode scaling over H100 | ×1.43 (4.8 ÷ 3.35 TB/s) | Whole latency case in §4 and the H200 premium in §10.2 |
+| 5b | H200 decode scaling over H100 | ×1.43 (4.8 ÷ 3.35 TB/s) | Whole latency case in §4 and the H200 premium in §11.2 |
 | 6 | Model config | Qwen3-30B-A3B-class (48 layers, 4 KV heads, head_dim 128) | Changes KV/token and slot count |
 | 7 | Decode wall-time per conversation | ~5 s | Sets concurrent stream count via Little's Law |
 | 8 | Knowledge-graph extraction density | ~10 entities + 20 edges per conversation | Linear on graph growth and storage |
 | 9 | Training MFU | 40% | Linear on continued-pre-training throughput |
-| 10 | Scheduled analytics pipeline runtime | ~4 h/day on `g6.4xlarge` | **Placeholder, not an estimate.** The workload is ~156+ time-series models behind a clustering/PCA/ICA pipeline whose dimensions are unspecified — see §6.2. Plausible range spans under $100/mo to a dedicated instance |
-| 11 | Commercial API comparison rate | $0.50/M in, $1.50/M out | Shifts the build-vs-buy multiple in §9 |
+| 10 | Scheduled analytics pipeline runtime | ~4 h/day on `g6.4xlarge` | **Placeholder, not an estimate.** The workload is ~156+ time-series models behind a clustering/PCA/ICA pipeline whose dimensions are unspecified — see §7. Plausible range spans under $100/mo to a dedicated instance |
+| 11 | Commercial API comparison rate | $0.50/M in, $1.50/M out | Shifts the build-vs-buy multiple in §10 |
 | 12 | Utilisation basis | 730 hours/month | Standard AWS month |
 | 13 | `p5e` 3-year reserved discount | 43.2% of on-demand, taken from `p5` | ±$25k/yr on the largest line; **derived, not quoted — confirm with AWS** |
 | 14 | Concurrent decoding streams at peak | ~25 (conservative) | Sets batch size and therefore per-stream decode. **Does not follow from Appx 1 + 7, which give ~6** — see `reference/SYSTEM_REQUIREMENTS.md` §2.1.8. Conservative, so latency is better than modelled, not worse |
@@ -617,7 +720,7 @@ Pricing verified August 2026, us-east-1:
 - [p5en.48xlarge pricing and specs — CloudPrice](https://cloudprice.net/aws/ec2/instances/p5en.48xlarge) — 8× H200 141 GB, **~$63.296/hr on-demand** — the rate used throughout this report
 - [p5e.48xlarge pricing and specs — Vantage](https://instances.vantage.sh/aws/ec2/p5e.48xlarge) — listed on-demand figure appears inconsistent with its own spot rate; **confirm p5e pricing directly with AWS**
 - [AWS quietly increases prices for H200 EC2 instances by 15% — Data Center Dynamics](https://www.datacenterdynamics.com/en/news/aws-quietly-increases-prices-for-h200-ec2-instances-by-15/) — H200 rates have moved recently; re-verify at purchase
-- **No open published 3-year reserved rate for `p5e` / `p5en` was found.** The $27.344/hr used in §8.1 is derived from p5's verified discount ratio and must be confirmed with AWS.
+- **No open published 3-year reserved rate for `p5e` / `p5en` was found.** The $27.344/hr used in §9.1 is derived from p5's verified discount ratio and must be confirmed with AWS.
 
 **H100 fallback, and the basis for the derived reserved rate:**
 
@@ -629,4 +732,4 @@ Pricing verified August 2026, us-east-1:
 - [p6-b200.48xlarge Specs & Pricing — DoiT Compute](https://www.doit.com/compute/spot/us-east-1/p6-b200.48xlarge) — $113.9328/hr on-demand
 - [Prerequisites for Capacity Blocks — AWS documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/capacity-blocks-prerequisites.html)
 
-Non-GPU instance and managed-service rates in §8.2 and §8.3 are list-price estimates and are **not** individually verified. Confirm them in the AWS Pricing Calculator for the target region before issuing a purchase order.
+Non-GPU instance and managed-service rates in §9.2 and §9.3 are list-price estimates and are **not** individually verified. Confirm them in the AWS Pricing Calculator for the target region before issuing a purchase order.
