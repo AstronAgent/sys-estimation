@@ -329,9 +329,9 @@
 
         <rect x="785" y="722" width="158" height="54" rx="6" fill="#0f172a"/>
         <rect x="785" y="722" width="158" height="54" rx="6" fill="rgba(30,41,59,0.6)" stroke="#64748b" stroke-width="1.5"/>
-        <text x="864" y="742" fill="white" font-size="10" font-weight="600" text-anchor="middle">Scheduled ML Model</text>
-        <text x="864" y="757" fill="#94a3b8" font-size="8" text-anchor="middle">runs on a fixed frequency</text>
-        <text x="864" y="770" fill="#94a3b8" font-size="8" text-anchor="middle">g6.4xlarge — 16 vCPU / 64 GB / L4</text>
+        <text x="864" y="742" fill="white" font-size="10" font-weight="600" text-anchor="middle">Analytics Pipeline</text>
+        <text x="864" y="757" fill="#94a3b8" font-size="8" text-anchor="middle">scheduled · ~156 TS models · cached</text>
+        <text x="864" y="770" fill="#fbbf24" font-size="8" text-anchor="middle">CPU-bound · sizing provisional</text>
 
         <!-- ============ LEGEND ============ -->
         <text x="758" y="34" fill="white" font-size="10" font-weight="600">Legend</text>
@@ -454,9 +454,9 @@
         <!-- Row 3: scheduled ML track -->
         <rect x="175" y="440" width="229" height="68" rx="6" fill="#0f172a"/>
         <rect x="175" y="440" width="229" height="68" rx="6" fill="rgba(30,41,59,0.6)" stroke="#64748b" stroke-width="1.5"/>
-        <text x="289" y="462" fill="white" font-size="10" font-weight="600" text-anchor="middle">Dedicated ML Model</text>
-        <text x="289" y="478" fill="#94a3b8" font-size="8" text-anchor="middle">EventBridge schedule · Spot-eligible</text>
-        <text x="289" y="496" fill="#94a3b8" font-size="8" text-anchor="middle">g6.4xlarge — 16 vCPU / 64 GB / 24 GB VRAM</text>
+        <text x="289" y="462" fill="white" font-size="10" font-weight="600" text-anchor="middle">Scheduled Analytics Pipeline</text>
+        <text x="289" y="478" fill="#94a3b8" font-size="8" text-anchor="middle">cluster → whiten/PCA → ICA → ~156 TS models</text>
+        <text x="289" y="496" fill="#fbbf24" font-size="8" text-anchor="middle">CPU/BLAS — no VRAM needed · not yet sized</text>
 
         <rect x="456" y="440" width="229" height="68" rx="6" fill="#0f172a"/>
         <rect x="456" y="440" width="229" height="68" rx="6" fill="rgba(8,51,68,0.4)" stroke="#38bdf8" stroke-width="1.5"/>
@@ -510,7 +510,7 @@
           <li>• <b>1× p5e.48xlarge</b> (8× H200 141 GB) carries live (3 GPU) + canary (1 GPU), 4 spare</li>
           <li>• <b>$311,089/yr</b> all-in on a 3-yr commit — $0.0284/conversation, $8.64/user/month</li>
           <li>• Price against <b>Capacity Blocks / Savings Plans</b> — on-demand p5e is the worst rate</li>
-          <li>• g6.4xlarge for the scheduled ML model (exact spec match)</li>
+          <li>• Scheduled analytics pipeline (~156 TS models) is <b>CPU work — sizing provisional</b></li>
           <li>• c7g.2xlarge = the 8 vCPU graph weight worker</li>
           <li>• Data tier is small: ~220 GB/yr Postgres, ~500 GB/yr vector, ~45 GB/yr graph</li>
         </ul>

@@ -43,7 +43,7 @@ flowchart TB
 
     subgraph offline["OFFLINE / SCHEDULED — never on the request path"]
         giw["Graph Ingestion Worker<br/>continuous · edge-weight calc<br/>c7g.2xlarge — 8 vCPU · ~12 writes/s"]
-        sml["Scheduled ML Model<br/>runs on a fixed frequency<br/>g6.4xlarge — 16 vCPU / 64 GB / L4"]
+        sml["Analytics Pipeline<br/>scheduled · ~156 TS models · cached<br/>CPU-bound · sizing provisional"]
     end
 
     users -->|"1 · HTTPS / SSE stream"| alb
@@ -110,7 +110,7 @@ flowchart TB
 | Knowledge graph | Neptune `db.r6g.2xlarge`, or Neo4j on `r7g.2xlarge` | ~110 M nodes/yr, ~45 GB/yr |
 | Graph ingestion worker | `c7g.2xlarge` (8 vCPU) | Edge-weight calculation, ~12 writes/s |
 | ML result cache | DynamoDB + native TTL | Read-only for the LLM |
-| Scheduled ML model | `g6.4xlarge` (16 vCPU / 64 GB / L4) | Fixed-frequency job, EventBridge-triggered |
+| Scheduled analytics pipeline | **Not yet sized** — `g6.4xlarge` placeholder | Clustering → whitening/PCA → ICA → ~156 parametric time-series models. CPU/BLAS work; see `reference/SYSTEM_REQUIREMENTS.md` §6.2 |
 
 ---
 
@@ -154,7 +154,7 @@ Runs on a fixed frequency and is **never on the request path**.
 ```mermaid
 flowchart LR
     ev(["EventBridge schedule"])
-    sml["Dedicated ML Model<br/>Spot-eligible<br/>g6.4xlarge — 16 vCPU / 64 GB / 24 GB VRAM"]
+    sml["Scheduled Analytics Pipeline<br/>cluster → whiten/PCA → ICA → ~156 TS models<br/>CPU/BLAS — no VRAM needed · not yet sized"]
     cache["ML Result Cache<br/>DynamoDB + native TTL"]
     mcp["MCP tool read — Fig. 1<br/>single-digit ms"]
 
@@ -208,7 +208,7 @@ flowchart LR
 - **1× `p5e.48xlarge`** carries live (3 GPUs) + canary (1 GPU), 4 spare for training
 - Price against **Capacity Blocks / Savings Plans** — on-demand p5e is the worst rate
 - **$311,089/yr all-in on a 3-year commit** · $0.0284 per conversation · $8.64 per user/month
-- `g6.4xlarge` for the scheduled ML model — an exact match to the stated spec
+- Scheduled analytics pipeline (~156 time-series models) is **CPU work, not GPU** — sizing provisional, see `reference/SYSTEM_REQUIREMENTS.md` §6.2
 - `c7g.2xlarge` is the 8 vCPU graph weight worker
 - Data tier is small: ~220 GB/yr Postgres, ~500 GB/yr vector, ~45 GB/yr graph
 

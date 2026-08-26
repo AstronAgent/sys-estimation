@@ -91,9 +91,9 @@
         <!-- Row 3: scheduled ML track -->
         <rect x="175" y="440" width="229" height="68" rx="6" fill="#0f172a"/>
         <rect x="175" y="440" width="229" height="68" rx="6" fill="rgba(30,41,59,0.6)" stroke="#64748b" stroke-width="1.5"/>
-        <text x="289" y="462" fill="white" font-size="10" font-weight="600" text-anchor="middle">Dedicated ML Model</text>
-        <text x="289" y="478" fill="#94a3b8" font-size="8" text-anchor="middle">EventBridge schedule · Spot-eligible</text>
-        <text x="289" y="496" fill="#94a3b8" font-size="8" text-anchor="middle">g6.4xlarge — 16 vCPU / 64 GB / 24 GB VRAM</text>
+        <text x="289" y="462" fill="white" font-size="10" font-weight="600" text-anchor="middle">Scheduled Analytics Pipeline</text>
+        <text x="289" y="478" fill="#94a3b8" font-size="8" text-anchor="middle">cluster → whiten/PCA → ICA → ~156 TS models</text>
+        <text x="289" y="496" fill="#fbbf24" font-size="8" text-anchor="middle">CPU/BLAS — no VRAM needed · not yet sized</text>
 
         <rect x="456" y="440" width="229" height="68" rx="6" fill="#0f172a"/>
         <rect x="456" y="440" width="229" height="68" rx="6" fill="rgba(8,51,68,0.4)" stroke="#38bdf8" stroke-width="1.5"/>

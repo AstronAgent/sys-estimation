@@ -317,7 +317,7 @@ AWS sells H200 in the **p5e** family. `p5e.48xlarge` (8× H200 141 GB, 192 vCPU,
 |---|---|---|
 | **Live LLM fleet** | 1× `p5e.48xlarge` | 2 active + 1 standby replica = **3 of 8 GPUs** |
 | Production Testing (canary) | Same instance, **1 GPU** | 4 of 8 GPUs still free for burst and swap staging |
-| Dedicated ML model (scheduled) | `g6.4xlarge` (1× L4 24 GB, 16 vCPU, 64 GB) | Exact match to the client spec. Scheduled, not always-on. |
+| Scheduled analytics pipeline | **Not yet sized** — `g6.4xlarge` carried as a placeholder | ~156 time-series models behind a clustering/PCA/ICA pipeline. CPU-bound; a `c7i.4xlarge` is likely correct unless something needs VRAM. See §6.2. |
 | RL post-training (LoRA) | Spare **H200** on the same `p5e.48xlarge`, off-peak | 1 GPU — see §8.1. This is the "1× H200" the requirement asked for. |
 
 **One `p5e.48xlarge` carries the entire live platform plus canary, with 4 GPUs spare.** That is one instance, not a cluster.
@@ -353,13 +353,94 @@ AWS sells H200 in the **p5e** family. `p5e.48xlarge` (8× H200 141 GB, 192 vCPU,
 - **Two auth layers.** User-facing: OIDC/OAuth2 + JWT with refresh, per-user rate limits. Service-to-service: **per-tool scoped tokens**. The LLM must never hold one credential that reaches every backend — a prompt-injected tool call would otherwise reach the whole data tier.
 - **Three cost/latency guards, all required:** iteration cap (6), per-conversation token budget, and wall-clock deadline (6 s).
 
-### 6.2 Dedicated ML model — scheduled, cached (client answer 2)
+### 6.2 Scheduled analytics pipeline — clustering → whitening → PCA → ICA → parametric time-series models
 
-The model runs on a fixed frequency, writes its inference output to a cache, and the LLM reads that cache through an MCP tool. It is **not** on the request path.
+> **Status: reported, not yet specified.** The "dedicated ML model" of client answer 2 is understood to be not one model but a **multivariate analytics pipeline feeding on the order of 156+ parametric time-series models**. The stages described are *clustering · whitening · PCA · modelling · ICA*, with the outputs feeding parametric time-series models. **No dimensions, cadence, or data volumes have been supplied**, so this section gives the sizing *model* rather than a sizing *answer*. Fill in §6.2.4 and every number below follows.
 
-- **Compute:** `g6.4xlarge` — 1× L4 24 GB, 16 vCPU, 64 GB RAM. Matches the stated spec. Trigger on EventBridge schedule; stop the instance between runs, or run on Spot.
-- **Cache:** DynamoDB with native TTL. Read latency single-digit ms, so the MCP tool call costs effectively nothing against the latency budget.
-- **Required policy decisions (new, see §8):** what frequency, what maximum acceptable staleness, and what happens on a cache miss — serve stale, trigger an on-demand run, or return "unavailable" and let the LLM proceed without it. The third option is usually correct for a latency-bound system.
+The pipeline runs on a fixed frequency, writes results to a cache, and the LLM reads that cache through an MCP tool. It is **not** on the request path — the latency budget in §4 is unaffected regardless of how long a run takes.
+
+#### 6.2.1 This is CPU work, and that is the main cost finding
+
+Every stage named is dense linear algebra or numerical optimisation over LAPACK/BLAS:
+
+| Stage | Kernel | Hardware |
+|---|---|---|
+| Clustering (k-means / hierarchical) | distance matrices, Lloyd iterations | **CPU** |
+| Whitening | eigendecomposition or Cholesky of the covariance | **CPU** |
+| PCA | SVD / eigendecomposition | **CPU** |
+| ICA (FastICA / Infomax) | iterative fixed-point on whitened data | **CPU** |
+| ARIMA / GARCH / VAR / state-space | MLE via quasi-Newton, Kalman filtering | **CPU** |
+
+**None of it needs a GPU.** The current line item is a `g6.4xlarge`, chosen because its L4 gives 24 GB VRAM against the "16 GB VRAM" in the stated spec — but nothing in this pipeline consumes VRAM. Two possibilities, and they should be resolved explicitly:
+
+- **The pipeline is the whole workload** → the GPU is dead weight. A compute-optimised instance (`c7i.4xlarge`, 16 vCPU / 32 GB, ~$0.71/hr) does the same work at roughly **half the hourly rate**, with better per-core throughput for BLAS.
+- **Something else in the workload needs the 16 GB VRAM** — a neural forecaster, an embedding model, a deep state-space model — in which case the GPU stays and the classical pipeline rides along on the same box for free.
+
+Ask which. The answer is worth ~$80/month on its own, but more importantly it determines whether this workload is GPU-contended with serving.
+
+#### 6.2.2 The pipeline ordering as described needs confirmation
+
+The stated order is *clustering → whitening → PCA → modelling → ICA → time-series models*. Two points:
+
+- **Whitening and PCA are normally the same operation.** Both come out of one eigendecomposition of the covariance; PCA whitening is projection onto the components followed by scaling to unit variance. Running them as separate stages usually means one decomposition, not two — so the cost model below counts it once.
+- **ICA conventionally comes *before* the downstream modelling, not after.** FastICA and Infomax both require whitened, dimension-reduced input as a precondition — that is what the PCA stage is normally *for*. An "ICA after modelling" step is unusual and may mean something specific (ICA on model residuals, for instance, which is a real technique for separating common shocks). **Confirm what the "modelling" stage between PCA and ICA actually is** — it sits in the middle of the cost model and is the one stage with no complexity estimate below.
+
+#### 6.2.3 Cost model
+
+Let `n` = observations per series, `d` = raw series/features, `k` = retained components, `M` = number of fitted time-series models (~156), `c` = clusters, `R` = refits per day.
+
+```
+Covariance + eigendecomposition   O(n·d² + d³)        ← whitening and PCA together
+Clustering (k-means, i iters)     O(i·n·c·d)
+ICA (FastICA, j iters, on k dims) O(j·n·k²)
+Time-series fits                  M · O(iters · n)    ← wall-clock usually optimiser-bound
+Peak memory                       ~8·n·d bytes (float64 design matrix) + O(d²) for the covariance
+
+Run wall-clock ≈ (linear-algebra terms / effective FLOPS) + (M · t_fit / parallel workers)
+Monthly cost   ≈ rate_hr · run_wall_clock_hr · R · 30
+```
+
+**Illustrative only — these inputs are invented to show the shape of the answer, not to predict it:**
+
+At `n` = 100,000, `d` = 500, `k` = 50, `c` = 20, `M` = 156, on 16 vCPU:
+
+| Term | Estimate |
+|---|---|
+| Covariance + eigendecomposition | ~2.5×10¹⁰ flops → **<1 s** |
+| Clustering | ~5×10⁹ flops → **~0.1 s** |
+| ICA | ~2.5×10¹⁰ flops → **<1 s** |
+| 156 time-series MLE fits @ ~10 s each | ~26 min serial → **~2 min across 16 cores** |
+| Design matrix in memory | 100,000 × 500 × 8 B = **400 MB** |
+| **Run wall-clock** | **~3 minutes** |
+
+If that shape holds, the workload is **minutes per run, not hours** — the existing ~4 h/day assumption (Appendix A #10) would be an order of magnitude too generous, and the line item is *over*-provisioned rather than under.
+
+**But the sensitivity is brutal, and it is all in `d` and `t_fit`:**
+
+| Change | Effect |
+|---|---|
+| `d`: 500 → 5,000 | covariance term ×100; memory 400 MB → 4 GB |
+| `d`: 500 → 50,000 | memory → **40 GB** — approaching the 64 GB box; PCA needs a randomised/truncated solver |
+| `t_fit`: 10 s → 120 s (GARCH with a slow optimiser) | 156 fits → ~20 min on 16 cores |
+| `R`: 1/day → hourly | ×24 on compute cost, and staleness policy becomes load-bearing |
+
+**This is why the section carries no number.** Between the cheapest and dearest plausible reading, the line moves from under $100/month to a dedicated always-on instance. It is not a material threat to a $311k/year total, but it should not be carried as a $159 guess either.
+
+#### 6.2.4 What is needed to size it
+
+1. **`n` and `d`** — observations per series, and how many series enter the pipeline. Drives memory first, compute second.
+2. **`k`** — components retained after PCA, and whether it is fixed or variance-threshold selected.
+3. **`M` confirmed** — is 156 the number of *fitted models*, of *output series*, or of *configurations* swept? These size very differently.
+4. **Model family per fit** — ARIMA, GARCH, VAR, state-space, or mixed. VAR on `k` series is `O(k³p³)` in the solve and behaves nothing like 156 univariate ARIMA fits.
+5. **Refit cadence `R`** vs *inference* cadence. Refitting parameters is the expensive part; applying fitted models to new data is nearly free, and the two are often confused in a single "run frequency" number.
+6. **Whether all 156 refit every run**, or on a rolling/staggered schedule. Staggering flattens the peak and shrinks the instance.
+7. **The "modelling" stage between PCA and ICA** — see §6.2.2.
+8. **Whether anything needs the GPU** — see §6.2.1.
+9. **Cache and staleness policy** — carried over as an open item: run frequency, maximum acceptable result age, and cache-miss behaviour (serve stale / trigger on-demand / return unavailable — the last is usually correct for a latency-bound system).
+
+#### 6.2.5 Cache
+
+DynamoDB with native TTL. Read latency is single-digit ms, so the MCP tool call costs effectively nothing against the latency budget in §4. Result volume scales with `M` × output horizon and is small at any plausible reading of the above.
 
 ### 6.3 Knowledge graph — continuous ingestion (client answer 3)
 
@@ -514,7 +595,7 @@ Full cost tables in `PLATFORM_REPORT.md` §8 and §10.2.
 ### 8.5 Still needed to finalise sizing
 
 1. **Exact Qwen3.6-35B-A3B config** — layer count, KV heads, head_dim, expert count. §3.2's KV math assumes a Qwen3-30B-A3B-class shape.
-2. **ML model frequency and staleness tolerance** — run cadence, maximum acceptable result age, and cache-miss behaviour (§6.2).
+2. **The analytics pipeline — nine inputs, listed in §6.2.4.** Dimensions, model count and family, refit cadence, and whether any stage needs a GPU. Currently the largest unsized item in the document.
 3. **Knowledge-graph extraction density** — entities and edges per conversation, which drives §6.3's growth numbers.
 4. **Whether graph weight calculation is incremental or global** — 8 vCPU supports the former, not the latter at scale (§6.3).
 5. **Confirmation that "pre-training" means continued/domain-adaptive** (§8.2).
@@ -529,7 +610,7 @@ Full cost tables in `PLATFORM_REPORT.md` §8 and §10.2.
 | Item | AWS | Qty |
 |---|---|---|
 | Live LLM fleet + canary | `p5e.48xlarge` (8× H200 141 GB) | **1** (3 GPUs live, 1 canary, 4 spare) |
-| Dedicated ML model (scheduled) | `g6.4xlarge` | 1 |
+| Scheduled analytics pipeline | **Provisional** — `g6.4xlarge` placeholder, likely `c7i.4xlarge` (§6.2) | 1 |
 | RL post-training (LoRA) | **Spare H200 on the existing `p5e.48xlarge`** — a second `p5e.48xlarge` only if hard isolation is required | 1 GPU |
 | Continued pre-training (LoRA) | Same spare-GPU pool, scheduled off-peak | 1 GPU |
 | Pre-training from scratch | **Not feasible on 1 GPU — see §8.2** | — |

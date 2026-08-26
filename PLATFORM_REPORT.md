@@ -66,7 +66,7 @@ A self-hosted platform serving **Qwen/Qwen3.6-35B-A3B** on SGLang to 3,000 daily
 | Response time SLA | **2–8 seconds** |
 | Cloud | AWS |
 | RL / pre-training hardware | 1× H200 or 1× B200 |
-| Dedicated ML model | 16 GB VRAM / 64 GB RAM / 16 vCPU, runs on a fixed frequency, results cached |
+| Dedicated ML model | 16 GB VRAM / 64 GB RAM / 16 vCPU, runs on a fixed frequency, results cached. **Now understood to be an analytics pipeline feeding ~156+ time-series models — see §6.2, not yet specified** |
 | Knowledge graph | Full graph, continuous ingestion, +8 vCPU for weight calculation |
 
 ---
@@ -243,6 +243,20 @@ At 3,000 DAU the data tier is small. Do not over-provision — but keep a horizo
 
 > **A continuously ingesting graph with no retention policy grows without bound.** Add decay, pruning, or entity consolidation from day one. Retrofitting it onto a 200-million-edge graph is painful.
 
+### 6.2 The scheduled analytics pipeline is not yet sized
+
+The "dedicated ML model" in §1 is understood to be not one model but a **multivariate pipeline — clustering, whitening, PCA, a modelling stage, ICA — feeding on the order of 156+ parametric time-series models.** It runs on a schedule and writes to a cache, so it is off the request path and does not touch the latency budget in §4.
+
+Three things follow, and only the first is settled:
+
+1. **It is CPU work, not GPU work.** Clustering, eigendecomposition, ICA, and ARIMA/GARCH/VAR fitting are all LAPACK/BLAS and numerical optimisation. Nothing consumes VRAM. The current line item is a `g6.4xlarge`, chosen for its L4 to match the stated "16 GB VRAM" — **if the pipeline is the whole workload, that GPU is dead weight** and a compute-optimised `c7i.4xlarge` does the same job at roughly half the rate. If something else in the workload genuinely needs 16 GB of VRAM, the GPU stays and the pipeline rides along for free. **Ask which.**
+
+2. **The cost is unsized, and honestly so.** Without the data dimensions, model count semantics, and refit cadence, the plausible range runs from under $100/month to a dedicated always-on instance. An illustrative worked example in `reference/SYSTEM_REQUIREMENTS.md` §6.2.3 — 100k observations, 500 series, 156 fits — comes out at **~3 minutes of wall-clock per run**, which would make the current ~4 h/day assumption an order of magnitude too generous. But that example's inputs are invented. The sensitivity is almost entirely in the number of input series and the per-fit optimiser time.
+
+3. **The pipeline ordering as described needs confirmation.** Whitening and PCA are normally one eigendecomposition, not two stages; and ICA conventionally runs *before* downstream modelling, since it requires whitened, reduced input. "Modelling then ICA" may mean ICA on model residuals — a real technique — but it should be confirmed rather than assumed. See §6.2.2 of the engineering detail.
+
+> **This does not threaten the headline number.** Even a generous reading of this workload is small against $311,089/year, and it has four spare H200s and 192 vCPU on the existing instance to fall back on if it turns out to be heavier than expected. But it should not continue to be carried as a $159/month guess. **Nine specific inputs would close it — listed in `reference/SYSTEM_REQUIREMENTS.md` §6.2.4.**
+
 ---
 
 ## 7. Training pipeline
@@ -342,8 +356,10 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 | Auth service | `m7g.large` | 0.082 | 2 | $120 |
 | Graph ingestion worker (8 vCPU) | `c7g.2xlarge` | 0.290 | 1 | $212 |
 | Vector DB (self-hosted) | `r7g.xlarge` | 0.214 | 3 | $469 |
-| Scheduled ML model | `g6.4xlarge` | 1.323 | ~4 h/day | $159 |
+| Scheduled analytics pipeline *(provisional — §6.2)* | `g6.4xlarge` | 1.323 | ~4 h/day | $159 |
 | | | | **Subtotal** | **~$1,912** |
+
+*The analytics-pipeline line is a placeholder, not an estimate — see §6.2. It could plausibly fall (CPU instance, minutes per run instead of hours) or rise (high-dimensional input, hourly refits). Either way it is small against the GPU tier, and the existing instance has spare capacity to absorb it.*
 
 ### 8.3 Managed services and storage
 
@@ -507,7 +523,7 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 ### Needed to finalise sizing
 
 5. **Exact Qwen3.6-35B-A3B config** — layer count, KV heads, head_dim, expert count. The KV math in §3.2 assumes a Qwen3-30B-A3B-class shape.
-6. **Scheduled ML model:** run frequency, maximum acceptable staleness, and cache-miss behaviour (serve stale / trigger on-demand / return unavailable — the last is usually correct for a latency-bound system).
+6. **The analytics pipeline (§6.2) — the largest unsized item in this report.** Nine inputs are needed, listed in `reference/SYSTEM_REQUIREMENTS.md` §6.2.4: data dimensions (`n`, `d`, `k`), what the "156 models" actually counts, the model family per fit, refit versus inference cadence, whether all fits refresh every run, what the "modelling" stage between PCA and ICA is, whether any stage needs a GPU, and the cache staleness and miss policy.
 7. **Knowledge-graph extraction density** — entities and edges per conversation, which drives §6 growth numbers.
 8. **Whether graph weight calculation is incremental or global** — 8 vCPU supports the former, not the latter at scale.
 
@@ -524,6 +540,8 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 | `p5e` capacity unavailable in the target region | Procurement delay | Confirm p5e/p5en availability early; `p5` (H100) remains a working fallback at the SLA cost set out in §10.2 |
 | p5e 3-year reserved rate worse than the derived $27.344/hr | Budget overrun on the largest line | Confirm with AWS before the purchase order (§8.1) |
 | Concurrency figure (~25 streams) not derived from the stated arrival rate | Batch sizes, and therefore every latency number, rest on an unverified input | Conservative direction — real latency should be better, not worse. Measure directly under production traffic; see `reference/SYSTEM_REQUIREMENTS.md` §2.1.8 |
+| Analytics pipeline (~156 models) materially larger than the $159/mo placeholder | Non-GPU compute line rises; a high-dimensional input could need its own instance | Off the request path, so no SLA exposure. 4 spare GPUs and 192 vCPU already on the instance. Size it properly with §6.2.4 |
+| Analytics pipeline provisioned on a GPU instance it does not use | ~$80/month wasted, and false GPU contention in capacity planning | Confirm whether any stage needs VRAM (§6.2); if not, move to `c7i.4xlarge` |
 
 ---
 
@@ -552,6 +570,8 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 - [ ] Measure the real prefix-cache hit rate under agentic traffic (assumed ~50% prefill saving)
 - [ ] **Measure concurrent decoding streams and decode wall-time under production-shaped traffic** — resolves the ~6-vs-~25 gap (`reference/SYSTEM_REQUIREMENTS.md` §2.1.8) that underpins every batch size and latency figure
 - [ ] **Confirm the daily load profile** — 24-hour uniform, or concentrated into business hours
+- [ ] **Specify the analytics pipeline** against the nine inputs in `reference/SYSTEM_REQUIREMENTS.md` §6.2.4, then re-cost the line in §8.2
+- [ ] **Time one full pipeline run on representative data** — wall-clock and peak RSS. Settles instance type, run window, and whether a GPU is needed at all
 - [ ] Measure the actual distribution of iterations per conversation (assumed avg 2.5, cap 6)
 - [ ] Confirm SSE streaming delivers time-to-first-token under ~3 s
 - [ ] Load-test graph ingestion at 12 writes/s with weight calculation running concurrently on 8 vCPU
@@ -577,7 +597,7 @@ Every number in this report derives from the inputs in §1 plus the following. E
 | 7 | Decode wall-time per conversation | ~5 s | Sets concurrent stream count via Little's Law |
 | 8 | Knowledge-graph extraction density | ~10 entities + 20 edges per conversation | Linear on graph growth and storage |
 | 9 | Training MFU | 40% | Linear on continued-pre-training throughput |
-| 10 | Scheduled ML model runtime | ~4 h/day | Linear on that line item only (~$159/mo) |
+| 10 | Scheduled analytics pipeline runtime | ~4 h/day on `g6.4xlarge` | **Placeholder, not an estimate.** The workload is ~156+ time-series models behind a clustering/PCA/ICA pipeline whose dimensions are unspecified — see §6.2. Plausible range spans under $100/mo to a dedicated instance |
 | 11 | Commercial API comparison rate | $0.50/M in, $1.50/M out | Shifts the build-vs-buy multiple in §9 |
 | 12 | Utilisation basis | 730 hours/month | Standard AWS month |
 | 13 | `p5e` 3-year reserved discount | 43.2% of on-demand, taken from `p5` | ±$25k/yr on the largest line; **derived, not quoted — confirm with AWS** |

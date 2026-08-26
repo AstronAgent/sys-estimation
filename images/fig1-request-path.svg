@@ -178,9 +178,9 @@
 
         <rect x="785" y="722" width="158" height="54" rx="6" fill="#0f172a"/>
         <rect x="785" y="722" width="158" height="54" rx="6" fill="rgba(30,41,59,0.6)" stroke="#64748b" stroke-width="1.5"/>
-        <text x="864" y="742" fill="white" font-size="10" font-weight="600" text-anchor="middle">Scheduled ML Model</text>
-        <text x="864" y="757" fill="#94a3b8" font-size="8" text-anchor="middle">runs on a fixed frequency</text>
-        <text x="864" y="770" fill="#94a3b8" font-size="8" text-anchor="middle">g6.4xlarge — 16 vCPU / 64 GB / L4</text>
+        <text x="864" y="742" fill="white" font-size="10" font-weight="600" text-anchor="middle">Analytics Pipeline</text>
+        <text x="864" y="757" fill="#94a3b8" font-size="8" text-anchor="middle">scheduled · ~156 TS models · cached</text>
+        <text x="864" y="770" fill="#fbbf24" font-size="8" text-anchor="middle">CPU-bound · sizing provisional</text>
 
         <!-- ============ LEGEND ============ -->
         <text x="758" y="34" fill="white" font-size="10" font-weight="600">Legend</text>
