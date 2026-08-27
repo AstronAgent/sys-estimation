@@ -78,6 +78,8 @@
 
 Everything in §3–§5 and in the cost tables is produced by the equations below. They are written out so each one can be checked, disputed, or re-run against measured values rather than inferred from the prose.
 
+> **Scope: this section models the LLM serving tier only.** The mathematical-model workload has its own model — complexity and memory equations per stage and per model family — in §7.4 (classical stages), **§7.8 (causal discovery: LiNGAM, VAR-LiNGAM, DYNOTEARS, SF-Slinear)** and **§7.9 (neural sequence models: RNN, GRU, LSTM)**, consolidated in §7.10. The two models are additive, not coupled: that workload is off the request path, so nothing in §7 can move a number in §4.
+
 ### 2.1.1 Symbols
 
 **Given by the client (§1) — not chosen here:**
@@ -317,7 +319,7 @@ AWS sells H200 in the **p5e** family. `p5e.48xlarge` (8× H200 141 GB, 192 vCPU,
 |---|---|---|
 | **Live LLM fleet** | 1× `p5e.48xlarge` | 2 active + 1 standby replica = **3 of 8 GPUs** |
 | Production Testing (canary) | Same instance, **1 GPU** | 4 of 8 GPUs still free for burst and swap staging |
-| Scheduled analytics pipeline | **Not yet sized** — `g6.4xlarge` carried as a placeholder | ~156 time-series models behind a clustering/PCA/ICA pipeline. CPU-bound; a `c7i.4xlarge` is likely correct unless something needs VRAM. See §7. |
+| Mathematical-model workload | `g6.4xlarge` — **GPU justified**, runtime still open | ~156 time-series models behind a clustering/PCA/causal-discovery/ICA pipeline, plus RNN/GRU/LSTM forecasters. The 16 vCPU carries the CPU stages (DYNOTEARS is the heaviest); the L4 carries the recurrent training at < 2 GB VRAM. See §7.8–§7.10. |
 | RL post-training (LoRA) | Spare **H200** on the same `p5e.48xlarge`, off-peak | 1 GPU — see §9.1. This is the "1× H200" the requirement asked for. |
 
 **One `p5e.48xlarge` carries the entire live platform plus canary, with 4 GPUs spare.** That is one instance, not a cluster.
@@ -374,11 +376,13 @@ Storage and write rate are both comfortable. **The concern is the weight calcula
 
 ---
 
-## 7. The mathematical-model workload — clustering → whitening/PCA → ICA → parametric time-series models
+## 7. The mathematical-model workload — clustering → whitening/PCA → causal discovery → ICA → time-series and neural models
 
-> **Status: reported, not yet specified.** The "dedicated ML model" of client answer 2 is understood to be not one model but a **multivariate analytics pipeline feeding on the order of 156+ parametric time-series models**. The stages given are *clustering · whitening · PCA · modelling · ICA*, with the outputs feeding parametric time-series models. **No dimensions, cadence, or data volumes have been supplied**, so this section gives the sizing *model* rather than a sizing *answer*. Supply §7.6 and every number below follows.
+> **Status: model families now named, dimensions still outstanding.** The "dedicated ML model" of client answer 2 is understood to be not one model but a **multivariate analytics pipeline feeding on the order of 156+ parametric time-series models**. The stages given are *clustering · whitening · PCA · modelling · ICA*, with the outputs feeding parametric time-series models. **No dimensions, cadence, or data volumes have been supplied**, so this section gives the sizing *model* rather than a sizing *answer*. Supply §7.6 and every number below follows.
+>
+> **What has since been named, and what it settles.** The "modelling" stage is **causal discovery — LiNGAM-family estimators, DYNOTEARS, and SF-Slinear (§7.8)** — and the workload additionally trains **recurrent neural forecasters: RNN, GRU, LSTM (§7.9)**. Two questions this section previously carried are answered as a result: §7.3's "what sits between PCA and ICA", and §7.1's "does anything need a GPU" — **yes, the recurrent models do**, and they are what the client's stated 16 GB VRAM refers to. §7.10 consolidates the whole workload into one hardware line.
 
-The pipeline runs on a fixed frequency, writes results to a cache, and the LLM reads that cache through an MCP tool. It is **not** on the request path — the latency budget in §4 is unaffected no matter how long a run takes. It is also not on the GPU tier (§7.1), so §3 is unaffected too.
+The pipeline runs on a fixed frequency, writes results to a cache, and the LLM reads that cache through an MCP tool. It is **not** on the request path — the latency budget in §4 is unaffected no matter how long a run takes. It sits on **its own GPU instance** (§7.9), not on the serving tier, so §3 is unaffected too.
 
 ### 7.1 This is CPU work, and that is the main cost finding
 
@@ -399,6 +403,8 @@ Every stage named is dense linear algebra or numerical optimisation over LAPACK/
 
 Ask which. The answer is worth ~$80/month directly, but more importantly it determines whether this workload is GPU-contended with serving.
 
+> **Answered — it is the second possibility.** §7.9 identifies the RNN/GRU/LSTM stage as genuine GPU work, and it is what the stated 16 GB VRAM refers to. **The `g6.4xlarge` stays and the `c7i.4xlarge` alternative above is superseded**: the L4 carries the recurrent training while the same box's 16 vCPU carries every CPU stage in this section, including DYNOTEARS. The table above remains correct about the classical stages — clustering, whitening, PCA, ICA, causal discovery and the parametric fits touch no VRAM — but it is no longer the whole workload. See §7.10.
+
 ### 7.2 Model families in scope
 
 "Parametric time-series models" most plausibly spans:
@@ -413,12 +419,23 @@ Ask which. The answer is worth ~$80/month directly, but more importantly it dete
 
 **The family matters more than the count.** 156 univariate fits parallelise perfectly across 16 cores and finish in minutes. A single VAR jointly modelling 156 series is one large solve that does not decompose, and its cost grows cubically in both series count and lag order. These are not interchangeable, and §7.6 item 4 exists to settle which it is.
 
+**Two further families are in scope, and they are not parametric time-series models at all:**
+
+| Family | Fit cost driver | Parallel over models? | Hardware | Detail |
+|---|---|---|---|---|
+| **Causal discovery** — LiNGAM, VAR-LiNGAM, DYNOTEARS, SF-Slinear | **cubic in the variable count**, not in the model count — one graph is estimated over all variables jointly | **no** — a single joint estimation | CPU | **§7.8** |
+| **Recurrent neural** — RNN, GRU, LSTM | `6 · Θ · tokens`, but throttled by the sequential timestep chain | yes, and batching across models is the main lever | **GPU** | **§7.9** |
+
+The same warning as VAR applies to causal discovery, and more sharply: **it is one joint estimation whose cost scales with the number of variables cubed, so it does not decompose across cores and is not made cheaper by having fewer models.** Dimensionality is the only lever. The recurrent models behave the opposite way — cheap individually, and the count is what accumulates.
+
 ### 7.3 The pipeline ordering as described needs confirmation
 
 The stated order is *clustering → whitening → PCA → modelling → ICA → time-series models*. Two points:
 
 - **Whitening and PCA are normally the same operation.** Both come out of one eigendecomposition of the covariance; PCA whitening is projection onto the components followed by scaling to unit variance. Running them as separate stages usually means one decomposition, not two — so the cost model below counts it once.
 - **ICA conventionally comes *before* the downstream modelling, not after.** FastICA and Infomax both require whitened, dimension-reduced input as a precondition — that is what the PCA stage is normally *for*. An "ICA after modelling" step is unusual and may mean something specific (ICA on model residuals, for instance, which is a real technique for separating common shocks from idiosyncratic ones). **Confirm what the "modelling" stage between PCA and ICA actually is** — it sits in the middle of the cost model and is the one stage with no complexity estimate below.
+
+> **Now answered: the middle stage is causal discovery**, costed in §7.8. That also makes the stated ordering coherent through the middle rather than inverted — every estimator in that family requires whitened, dimension-reduced input as a precondition, which is exactly what the PCA stage is for, so *whitening → PCA → causal discovery* is the conventional order. What remains unusual is ICA appearing **after** it. The likeliest reading is ICA on the residuals of the fitted structural model — separating common shocks — which is how §7.8 assumes it is meant. **Confirm that specifically.** Note also that ICA-LiNGAM (§7.8.1) *is* itself an ICA-based estimator, so the two ICA mentions in the stated pipeline may be one operation counted twice.
 
 ### 7.4 Cost model
 
@@ -428,12 +445,16 @@ Let `n` = observations per series, `d` = raw series/features, `k` = retained com
 Covariance + eigendecomposition   O(n·d² + d³)        ← whitening and PCA together
 Clustering (k-means, i iters)     O(i·n·c·d)
 ICA (FastICA, j iters, on k dims) O(j·n·k²)
+Causal discovery                  see §7.8            ← the "modelling" stage; cubic in the variable count
 Time-series fits                  M · O(iters · n)    ← wall-clock usually optimiser-bound
+Neural sequence training          6 · Θ · tokens_seen ← see §7.9; the only GPU term
 Peak memory                       ~8·n·d bytes (float64 design matrix) + O(d²) covariance
 
-Run wall-clock ≈ (linear-algebra terms / effective FLOPS) + (M · t_fit / parallel workers)
+Run wall-clock ≈ (CPU terms / effective FLOPS) + (M · t_fit / parallel workers) + (neural term / effective GPU FLOPS)
 Monthly cost   ≈ rate_hr · run_wall_clock_hr · R · 30
 ```
+
+The causal and neural terms were added once the model families were named. **The causal term is the one that can dominate the run** — it is cubic in the variable count where every other term here is linear or quadratic. §7.10 gives the consolidated per-stage wall-clock; the illustrative total there is ~20–30 minutes rather than the ~3 minutes below, and the difference is almost entirely DYNOTEARS.
 
 **Illustrative only — these inputs are invented to show the shape of the answer, not to predict it:**
 
@@ -481,13 +502,234 @@ Model *count* creates obligations that model *cost* does not. None of these are 
 4. **Model family per fit** — see §7.2. VAR behaves nothing like 156 univariate ARIMA fits.
 5. **Refit cadence `R`** vs *inference* cadence. Refitting parameters is the expensive part; applying fitted models to new data is nearly free, and the two are often confused in a single "run frequency" number.
 6. **Whether all 156 refit every run**, or on a rolling/staggered schedule. Staggering flattens the peak and shrinks the instance.
-7. **The "modelling" stage between PCA and ICA** — see §7.3.
-8. **Whether anything needs the GPU** — see §7.1.
+7. ~~**The "modelling" stage between PCA and ICA**~~ — **answered: causal discovery (§7.8).** What remains open is the ICA-after-modelling question in §7.3.
+8. ~~**Whether anything needs the GPU**~~ — **answered: yes, the recurrent models (§7.9).** What remains open is their shape, item 13.
 9. **Cache and staleness policy** — run frequency, maximum acceptable result age, and cache-miss behaviour (serve stale / trigger on-demand / return unavailable — the last is usually correct for a latency-bound system).
+
+**Added once the model families were named (§7.8, §7.9):**
+
+10. **Lag order `p`** for VAR-LiNGAM and DYNOTEARS, and whether it is fixed or AIC-selected over a candidate range. It enters cubically through `(d·p)³`.
+11. **Which causal estimators run, and on what.** Raw `d` series, or the `k` retained components? **This is the single largest cost lever in the workload** — the same estimator is seconds on `k` and hours on `d` (§7.8).
+12. **What "SF-Slinear" denotes.** Sparse/stepwise-forward linear structure learning, or the LTSF-Linear (SLinear/DLinear/NLinear) forecaster. The two readings are two orders of magnitude apart in cost and belong in different stages entirely.
+13. **RNN/GRU/LSTM shape** — hidden width `h`, layer count, sequence length `L_seq`, epochs, and whether these models are *part of* the ~156 count or *in addition to* it. `h` drives flops quadratically; `L_seq` drives both flops and activation memory linearly.
 
 ### 7.7 Cache
 
 DynamoDB with native TTL. Read latency is single-digit ms, so the MCP tool call costs effectively nothing against the latency budget in §4. Result volume scales with `M` × output horizon and is small at any plausible reading of the above.
+
+### 7.8 Causal discovery — LiNGAM family, DYNOTEARS, SF-Slinear
+
+> **Status: named, not yet dimensioned.** This is the "modelling" stage §7.3 flagged as the one stage with no complexity estimate. Naming the estimators closes that gap in *shape*; the dimensions (`n`, `d`, `k`, lag order `p`) are still required before the stage can carry a number — §7.6 items 10–12.
+
+Every estimator here fits a **linear structural equation model** over `d` variables from `n` observations. They differ in what identifies the causal graph — non-Gaussianity, a smooth acyclicity penalty, or a scored search — not in the underlying algebra, which is least squares over `d`-dimensional data. That is why the whole family stays **CPU-bound**, and why every cost below is polynomial in the *variable count* rather than in data volume.
+
+**Symbols** (extending §7.4): `n` observations · `d` raw variables/series · `k` retained PCA components · `p` lag order · `s` selected parents per node.
+
+#### 7.8.1 LiNGAM — Linear Non-Gaussian Acyclic Model
+
+The structural model and its reduced form:
+
+```
+x = B x + e        e_i mutually independent and non-Gaussian;
+                   B strictly lower-triangular under some unknown causal ordering
+
+x = A e            A = (I − B)⁻¹
+```
+
+**Non-Gaussianity is what makes `B` identifiable.** Under Gaussian noise the causal ordering is not recoverable from observational data at all — closing exactly that gap is the reason the method exists. One operational consequence is worth stating plainly: **if the inputs are near-Gaussian after whitening, LiNGAM returns an arbitrary ordering rather than an error.** Whatever consumes the causal graph downstream must not treat it as self-validating. This belongs on the convergence-monitoring list in §7.5.
+
+Two estimators, with materially different cost and failure modes:
+
+| Estimator | How it recovers the ordering | Complexity | Character |
+|---|---|---|---|
+| **ICA-LiNGAM** | ICA yields `W ≈ P·D·(I − B)`; recover `B` by row-permuting to a nonzero diagonal (Hungarian assignment), rescaling, then pruning | `O(j·n·d²)` for `j` ICA iterations, `+ O(d³)` for the assignment | Reuses the ICA machinery already in the pipeline. Inherits ICA's local optima — **not deterministic**, and it can fail silently |
+| **DirectLiNGAM** | `d` rounds; each round selects the next root by testing pairwise independence of regression residuals across the remaining variables | `~O(n·d³)` with a moment-based independence measure. A kernel-based measure raises this sharply — `O(n·d³M² + d⁴M³)` for kernel rank `M` | Deterministic, terminates in a fixed number of steps. **Prefer it** unless `d` is large |
+
+**The choice becomes a cost decision around `d ≳ 100`.** Below that, DirectLiNGAM's `d³` term is seconds and its determinism is free. Above it, the `d³` — or `d⁴` with kernel measures — starts to dominate the entire run.
+
+#### 7.8.2 VAR-LiNGAM — the time-series form
+
+The workload feeds time series, so the lagged variant is the relevant one. It separates instantaneous from lagged effects in three steps:
+
+```
+x_t = Σ_{τ=0..p} B_τ x_{t−τ} + e_t
+
+1. Fit a classical VAR by OLS for τ ≥ 1   →  residuals r_t and coefficients M_τ
+2. Run LiNGAM on r_t                      →  B₀, the instantaneous (contemporaneous) graph
+3. Correct the lagged matrices            →  B_τ = (I − B₀) · M_τ
+```
+
+```
+Cost   = O(n·d²·p² + (d·p)³)      ← VAR OLS: form the normal equations, then solve
+       + LiNGAM cost above        ← run on the d-dimensional residuals
+Memory ≈ 8·n·d·p bytes (float64 lag design matrix) + O((d·p)²) for the normal equations
+```
+
+**`p` enters cubically** through `(d·p)³`. A lag order selected by AIC over a wide candidate range is therefore a real cost driver rather than a modelling detail — cap the candidate range explicitly. Note also that step 1 is the same `O(n·k²p) + O(k³p³)` joint solve that §7.2 flags for VAR: it does not decompose across cores.
+
+#### 7.8.3 DYNOTEARS — continuous-optimisation dynamic structure learning
+
+DYNOTEARS abandons combinatorial search entirely and solves a smooth constrained optimisation instead. With `X` the `n × d` contemporaneous matrix, `Y` the `n × dp` stacked lagged matrix, `W` the intra-slice (contemporaneous) graph and `A` the inter-slice (lagged) graph:
+
+```
+min_{W,A}   (1/2n)·‖X − X W − Y A‖²_F  +  λ_W‖W‖₁  +  λ_A‖A‖₁
+
+subject to  h(W) = tr(e^{W∘W}) − d = 0        ← h(W) = 0  ⟺  W is acyclic
+```
+
+`∘` is the Hadamard product. That trace-of-matrix-exponential term is the whole trick: a **smooth, differentiable certificate of acyclicity** replacing a discrete DAG constraint, which is what lets a gradient-based solver attack a problem that is otherwise combinatorial. It is solved by an augmented Lagrangian outer loop with L-BFGS inside:
+
+```
+per gradient evaluation   O(n·d²·(1 + p))          ← least-squares term and its gradient
+                        + O(d³)                    ← matrix exponential for h(W) and ∇h(W)
+
+total                     O(T_out · T_in · (n·d²(1+p) + d³))
+memory                    ~8·n·d·(1+p) bytes + O(d²·p)
+```
+
+`T_out` is typically 10–30 augmented-Lagrangian rounds and `T_in` tens to low hundreds of L-BFGS steps. **The asymptotics resemble VAR's, but the constant factor is thousands of evaluations** — expect DYNOTEARS to cost one to two orders of magnitude more wall-clock than VAR-LiNGAM at equal dimensionality.
+
+> **The `d³` matrix exponential is the wall, and it is the single most important sizing fact in this section.** At `d` = 500 it is ~1.25×10⁸ flops per evaluation — negligible. At `d` = 5,000 it is 1.25×10¹¹ per evaluation, and it runs thousands of times. **Run DYNOTEARS on the `k` retained components, not on raw `d`** — or restrict it to per-cluster subgraphs using §7.4's `c` clusters, which turns one `d³` into `c · (d/c)³`, saving a factor of `c²`.
+
+#### 7.8.4 SF-Slinear — the name is ambiguous, and the two readings cost differently
+
+**This is the one item in the stated list that cannot be identified unambiguously from the name, and the two plausible readings sit at opposite ends of the cost range.** Both are carried rather than guessed at; §7.6 item 12 asks the question.
+
+| Reading | What it would be | Complexity | Which stage it belongs to |
+|---|---|---|---|
+| **Sparse / stepwise-forward linear structure learning** | Greedy forward selection of parents per node under a sparsity score (BIC or ℓ₀) — the score-based sibling of the estimators above | `O(d²·n·s)` for `s` selected parents per node, `+ O(d·s³)` for the per-node regressions | Here — a third causal-discovery estimator alongside LiNGAM and DYNOTEARS |
+| **LTSF-Linear family (SLinear / DLinear / NLinear)** | Not causal discovery at all — a single dense `L × H` matrix mapping a lookback window of length `L` to a forecast horizon `H`; the "a linear layer beats transformers on long-horizon forecasting" baseline | `L·H` parameters per series; `2·L·H` flops per forecast — **~10⁵ flops, effectively free** | §7.4 — one more entry in the `M` ≈ 156 forecasting-model count |
+
+Under the second reading the item costs nothing worth modelling. Under the first it is a genuine `O(d²·n·s)` stage. **The grouping in the source list — alongside LiNGAM and DYNOTEARS — favours the first reading, but the name most closely matches the second. Ask.**
+
+#### 7.8.5 Compute requirement — causal stage
+
+Illustrative, on the same invented inputs as §7.4 (`n` = 100,000, `d` = 500, `k` = 50, `p` = 3), 16 vCPU:
+
+| Estimator | Run on | Dominant term | Estimate |
+|---|---|---|---|
+| DirectLiNGAM | `k` = 50 | `n·k³` = 1.25×10¹⁰ | **~2 s** |
+| DirectLiNGAM | raw `d` = 500 | `n·d³` = 1.25×10¹³ | **~30 min** — avoid |
+| VAR-LiNGAM (`p` = 3) | `k` = 50 | `n·k²p²` + `(k·p)³` | **~5 s** |
+| DYNOTEARS (`T_out·T_in` ≈ 2,000) | `k` = 50 | 2,000 × (`4·n·k²` + `k³`) | **~10–20 min** ← dominant |
+| DYNOTEARS | raw `d` = 500 | 2,000 × (`4·n·d²` + `d³`) | **hours — infeasible per run** |
+| SF-Slinear (structure-learning reading, `s` = 5) | `k` = 50 | `d²·n·s` | **~1 min** |
+| Peak memory (any of the above, `k` = 50, `p` = 3) | | `8·n·k·(1+p)` | **160 MB** |
+
+**Two findings, and they are the actionable part of this subsection:**
+
+1. **Dimension reduction is a precondition here, not an optimisation.** Every estimator is at least quadratic and mostly cubic in the variable count, so running causal discovery on the `k` retained components rather than the raw `d` series is the difference between seconds and hours. It is also the coherent answer to §7.3's ordering question: whitening and PCA exist precisely to make this stage both tractable and identifiable.
+2. **DYNOTEARS is the only member of the family that can dominate a run.** Everything else is seconds. If wall-clock ever becomes a problem, look here first, and reach for per-cluster subgraphs before reaching for a bigger instance.
+
+### 7.9 Neural sequence models — RNN, GRU, LSTM
+
+> **This resolves §7.1's open question: yes, part of this workload needs a GPU.** The recurrent forecasters are the only VRAM consumers, they are what the client's stated "16 GB VRAM" refers to, and they are why the `g6.4xlarge` line item is **justified rather than dead weight** — reversing §7.1's provisional recommendation. See §7.10.
+
+Recurrent models carry a hidden state across time. Per layer, with input width `x`, hidden width `h`, sequence length `L_seq`:
+
+**Vanilla RNN** — one transform per step:
+
+```
+h_t = tanh(W_x x_t + W_h h_{t−1} + b)
+
+params = h·(x + h) + h
+```
+
+**GRU** — two gates and a candidate state:
+
+```
+z_t = σ(W_z · [h_{t−1}, x_t])                 update gate
+r_t = σ(W_r · [h_{t−1}, x_t])                 reset gate
+h̃_t = tanh(W_h · [r_t ⊙ h_{t−1}, x_t])       candidate state
+h_t = (1 − z_t) ⊙ h_{t−1} + z_t ⊙ h̃_t
+
+params = 3·(h·(x + h) + h)
+```
+
+**LSTM** — three gates, a candidate, and a separate cell state:
+
+```
+i_t = σ(W_i · [h_{t−1}, x_t])                 input gate
+f_t = σ(W_f · [h_{t−1}, x_t])                 forget gate
+o_t = σ(W_o · [h_{t−1}, x_t])                 output gate
+g_t = tanh(W_g · [h_{t−1}, x_t])              candidate
+c_t = f_t ⊙ c_{t−1} + i_t ⊙ g_t               cell state — the gradient highway
+h_t = o_t ⊙ tanh(c_t)
+
+params = 4·(h·(x + h) + h)
+```
+
+The cell state `c_t` is the point of the architecture: its **additive** update gives gradients a path backwards through time that does not repeatedly multiply by a weight matrix, which is what makes LSTM and GRU trainable on sequences where a vanilla RNN's gradients vanish. Gate count is also the cost ratio — **RNN : GRU : LSTM = 1 : 3 : 4** in both parameters and flops at equal hidden width. Choosing GRU over LSTM saves ~25%; choosing a plain RNN saves 4× and usually costs accuracy on any sequence long enough to justify the architecture.
+
+#### 7.9.1 Cost model
+
+```
+params_layer   = G · (h·(x + h) + h)        G = 1 (RNN), 3 (GRU), 4 (LSTM)
+Θ              = Σ_layers params_layer      total trainable parameters per model
+
+forward flops  ≈ 2 · Θ · L_seq              per sequence
+training flops ≈ 6 · Θ · L_seq              per sequence (forward + backward ≈ 3× forward)
+training total ≈ 6 · Θ · tokens_seen        tokens_seen = N_windows · L_seq · epochs
+
+BPTT activation memory   ≈ B · L_seq · h · G · n_layers · bytes_per_elem
+rolling inference memory ≈ B · h · n_layers · bytes    ← state only, no sequence buffer
+```
+
+> **`6 · Θ · tokens` is the same rule used for the LLM in §9.2.** It transfers directly. Only `Θ` changes — by roughly five orders of magnitude.
+
+#### 7.9.2 The utilisation caveat — the real compute finding
+
+**The `L_seq` timesteps are strictly sequential: step `t` cannot begin until `t−1` completes**, and each step is a small matrix–vector product. On a GPU built for large matrix–matrix work this yields **single-digit percent MFU** — far below the 40% assumed for LLM training (`PLATFORM_REPORT.md` Appendix A #9). Fused cuDNN kernels recover part of it, but the dependency chain is structural and no hardware choice removes it.
+
+**The lever is batching, not a bigger GPU.** Running many series and many windows concurrently turns each timestep into a wide matrix–matrix product. With ~156 models to fit, batching across models is available essentially for free and should be assumed in any sizing. **Do not size this stage by buying a faster card** — an H100 would run it at the same few percent of a much larger number.
+
+#### 7.9.3 Compute requirement — neural stage
+
+Illustrative: 2-layer LSTM, `h` = 128, `x` = 1, `L_seq` = 64, `n` = 100,000 timesteps per series, 50 epochs, across 156 models:
+
+| Quantity | Working | Value |
+|---|---|---|
+| Params, layer 1 | 4 · (128·(1 + 128) + 128) | 66,560 |
+| Params, layer 2 | 4 · (128·(128 + 128) + 128) | 131,584 |
+| **Θ per model** | | **~198,000** |
+| Tokens seen per model | 100,000 × 50 epochs | 5×10⁶ |
+| Training flops per model | 6 × 1.98×10⁵ × 5×10⁶ | **~6×10¹²** |
+| **All 156 models** | | **~9.3×10¹⁴ flops** |
+| Effective throughput (L4, ~3% MFU of ~120 TFLOPS BF16) | | ~3.6 TFLOPS |
+| **Wall-clock, all 156, batched** | 9.3×10¹⁴ ÷ 3.6×10¹² | **~4–5 minutes** |
+| BPTT activations at batch 256 | 256 × 64 × 128 × 4 × 2 layers × 2 B | **~34 MB** |
+| Weights + Adam state, all 156 resident | 156 × 198k × 16 B | **~500 MB** |
+| **Peak VRAM** | | **< 2 GB** |
+
+**Three findings:**
+
+1. **These models are tiny.** Under 2 GB against the 16 GB the spec asked for and the 24 GB an L4 provides. VRAM is not a constraint under any plausible reading — reaching 16 GB would take roughly a 50× increase in hidden width or model count. **The GPU is needed for throughput, not capacity**, which means a smaller card would also serve.
+2. **Training is minutes, not hours**, and it fits inside the same scheduled window as the classical stages — consistent with §7.4's ~3-minute finding rather than with the 4 h/day placeholder in `PLATFORM_REPORT.md` Appendix A #10.
+3. **Sensitivity is concentrated in `h` and `L_seq`.** `h`: 128 → 512 is **16×** the flops, since parameters scale as `h²`. `L_seq`: 64 → 512 is **8×** the flops *and* 8× the activation memory. A 512-wide, 512-long LSTM across 156 models is ~128× the table above — hours rather than minutes, and the point at which the GPU stops being a convenience.
+
+**These models also inherit every obligation in §7.5**, and add one: neural forecasters have no convergence diagnostic as crisp as an MLE failure. Early stopping on a held-out window, with the stopping epoch recorded per model, is the minimum.
+
+### 7.10 Consolidated — the workload now has a defensible hardware shape
+
+Combining §7.4, §7.8 and §7.9 at the illustrative dimensions:
+
+| Stage | Hardware | Peak memory | Illustrative wall-clock |
+|---|---|---|---|
+| Clustering / whitening / PCA / ICA | CPU (BLAS/LAPACK) | ~400 MB RAM | < 3 s |
+| Causal discovery — LiNGAM / VAR-LiNGAM | CPU | ~160 MB | ~5 s |
+| **Causal discovery — DYNOTEARS on `k`** | CPU, multi-core | ~160 MB | **~10–20 min ← dominant** |
+| SF-Slinear | CPU | small | ~1 min, or free — see §7.8.4 |
+| ~156 parametric time-series fits | CPU, embarrassingly parallel | small | ~2 min on 16 cores |
+| **RNN / GRU / LSTM training** | **GPU** | **< 2 GB VRAM** | **~5 min batched** |
+| **Total per run** | **16 vCPU + one small GPU** | **~1 GB RAM, < 2 GB VRAM** | **~20–30 min** |
+
+**Three consequences for the bill of materials:**
+
+1. **Keep the GPU — `g6.4xlarge` is justified rather than provisional.** §7.1 recommended dropping to a `c7i.4xlarge` on the grounds that nothing consumed VRAM. **That recommendation is superseded.** RNN/GRU/LSTM training is real GPU work; the L4's 24 GB comfortably covers the stated 16 GB requirement, and the same instance's 16 vCPU carries every CPU stage including DYNOTEARS. **One `g6.4xlarge` runs the entire workload** — no split, no second instance, and no contention with the serving H200s.
+2. **DYNOTEARS, not the neural models, is the wall-clock risk.** The intuitive expectation is that the deep-learning stage dominates. It does not — ~5 minutes against DYNOTEARS' ~10–20 — and DYNOTEARS is also the term that explodes with dimensionality while the neural term grows only linearly in model count. Direct review effort accordingly.
+3. **The $159/month placeholder now looks like a ceiling rather than a guess.** At ~20–30 minutes per daily run the true figure is nearer ~$25/month. The 4 h/day assumption is **retained deliberately as a conservative bound** until real dimensions arrive. Either way it is immaterial against $311,089/year.
+
+> **Still entirely off the request path.** All of this is scheduled work writing to the DynamoDB cache of §7.7. Nothing in §7.8 or §7.9 touches the latency budget in §4, and none of it competes for the serving GPUs.
 
 ---
 
@@ -624,7 +866,7 @@ Full cost tables in `PLATFORM_REPORT.md` §9 and §11.2.
 ### 9.5 Still needed to finalise sizing
 
 1. **Exact Qwen3.6-35B-A3B config** — layer count, KV heads, head_dim, expert count. §3.2's KV math assumes a Qwen3-30B-A3B-class shape.
-2. **The mathematical-model workload — nine inputs, listed in §7.6.** Dimensions, model count and family, refit cadence, and whether any stage needs a GPU. Currently the largest unsized item in the document.
+2. **The mathematical-model workload — thirteen inputs, listed in §7.6.** Dimensions, model count and family, refit cadence, lag order, which causal estimators run and at what dimensionality, what "SF-Slinear" denotes, and the RNN/GRU/LSTM shapes. Still the largest unsized item in the document, though the *shape* of the answer is now fixed (§7.8–§7.10) and the GPU question is closed.
 3. **Knowledge-graph extraction density** — entities and edges per conversation, which drives §6.2's growth numbers.
 4. **Whether graph weight calculation is incremental or global** — 8 vCPU supports the former, not the latter at scale (§6.2).
 5. **Confirmation that "pre-training" means continued/domain-adaptive** (§9.2).
@@ -639,7 +881,7 @@ Full cost tables in `PLATFORM_REPORT.md` §9 and §11.2.
 | Item | AWS | Qty |
 |---|---|---|
 | Live LLM fleet + canary | `p5e.48xlarge` (8× H200 141 GB) | **1** (3 GPUs live, 1 canary, 4 spare) |
-| Mathematical-model workload (~156 TS models) | **Provisional** — `g6.4xlarge` placeholder, likely `c7i.4xlarge` (§7) | 1 |
+| Mathematical-model workload (~156 TS models + causal discovery + RNN/GRU/LSTM) | `g6.4xlarge` (16 vCPU + 1× L4 24 GB) — GPU justified by the recurrent stage (§7.9); runtime still provisional (§7.6) | 1 |
 | RL post-training (LoRA) | **Spare H200 on the existing `p5e.48xlarge`** — a second `p5e.48xlarge` only if hard isolation is required | 1 GPU |
 | Continued pre-training (LoRA) | Same spare-GPU pool, scheduled off-peak | 1 GPU |
 | Pre-training from scratch | **Not feasible on 1 GPU — see §9.2** | — |
@@ -670,6 +912,8 @@ Full cost tables in `PLATFORM_REPORT.md` §9 and §11.2.
 - [ ] **Confirm the daily load profile** — 24-hour uniform or concentrated business hours. §2 assumes uniform; the concurrency figure in use implies concentration (§2.1.8)
 - [ ] Measure the actual distribution of iterations per conversation (assumed avg 2.5, cap 6) — if the tail is fatter than modelled, §4.1's deadline mechanism carries the SLA
 - [ ] Confirm SSE streaming delivers TTFT under ~3 s (modelled ~1.9 s on H200)
+- [ ] **Confirm which causal estimators run, and on raw `d` or the `k` components** (§7.8) — DYNOTEARS on raw `d` is the one configuration that turns a minutes-long run into an hours-long one
+- [ ] **Confirm the RNN/GRU/LSTM shapes** (§7.9) — VRAM is modelled at < 2 GB against a stated 16 GB requirement; if `h` or `L_seq` are much larger than modelled, re-run §7.10
 - [ ] Load-test knowledge-graph ingestion at 12 writes/s with weight calculation running concurrently on 8 vCPU
 - [ ] Rehearse a hot-swap under live traffic — confirm zero dropped connections
 - [ ] Rehearse an eval-gate failure — confirm automatic rollback

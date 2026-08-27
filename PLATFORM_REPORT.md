@@ -66,7 +66,7 @@ A self-hosted platform serving **Qwen/Qwen3.6-35B-A3B** on SGLang to 3,000 daily
 | Response time SLA | **2–8 seconds** |
 | Cloud | AWS |
 | RL / pre-training hardware | 1× H200 or 1× B200 |
-| Dedicated ML model | 16 GB VRAM / 64 GB RAM / 16 vCPU, runs on a fixed frequency, results cached. **Now understood to be an analytics pipeline feeding ~156+ time-series models — see §7, not yet specified** |
+| Dedicated ML model | 16 GB VRAM / 64 GB RAM / 16 vCPU, runs on a fixed frequency, results cached. **Now understood to be an analytics pipeline — clustering/PCA/ICA plus causal discovery (LiNGAM, DYNOTEARS, SF-Slinear) and recurrent forecasters (RNN/GRU/LSTM) — feeding ~156+ time-series models. See §7; dimensions not yet specified. The recurrent models are what the 16 GB VRAM is for** |
 | Knowledge graph | Full graph, continuous ingestion, +8 vCPU for weight calculation |
 
 ---
@@ -247,9 +247,11 @@ At 3,000 DAU the data tier is small. Do not over-provision — but keep a horizo
 
 ## 7. The mathematical-model workload
 
-The platform runs a second, entirely separate workload alongside the LLM: a **multivariate analytics pipeline feeding on the order of 156+ parametric time-series models.** This is the "dedicated ML model" of §1, and treating it as one model understated it considerably.
+The platform runs a second, entirely separate workload alongside the LLM: a **multivariate analytics pipeline feeding on the order of 156+ parametric time-series models**, plus **causal discovery** and **recurrent neural forecasters.** This is the "dedicated ML model" of §1, and treating it as one model understated it considerably.
 
 It runs on a fixed schedule, writes its output to a cache, and the LLM reads that cache through an MCP tool. **It is not on the request path**, so nothing in this section affects the latency budget in §4 or the GPU sizing in §3.
+
+> **The model families are now named, and that settles two open questions.** The previously-unspecified "modelling" stage is **causal discovery — LiNGAM-family estimators, DYNOTEARS, and SF-Slinear (§7.7)** — and the workload additionally trains **RNN, GRU and LSTM forecasters (§7.8)**. Consequently the GPU question in §7.2 is answered *yes*, and the `g6.4xlarge` line item is justified rather than provisional. Full mathematics, complexity and compute requirements are in `reference/SYSTEM_REQUIREMENTS.md` §7.8–§7.10.
 
 ### 7.1 The pipeline
 
@@ -267,30 +269,35 @@ raw series → clustering → whitening → PCA → [modelling] → ICA → ~156
 | Clustering | segments series into groups before decomposition | k-means / hierarchical |
 | Whitening | decorrelates and normalises to unit variance | eigendecomposition or Cholesky |
 | PCA | reduces dimension, retains `k` components | SVD / eigendecomposition |
-| *modelling* | **unspecified — see §7.3** | — |
+| *modelling* | **causal discovery — LiNGAM, DYNOTEARS, SF-Slinear. See §7.7** | least squares + acyclicity optimisation |
 | ICA | separates statistically independent sources | FastICA / Infomax |
 | Time-series models | ~156 parametric fits on the resulting components | MLE, quasi-Newton, Kalman |
+| **Neural forecasters** | **RNN / GRU / LSTM trained on the same components. See §7.8** | **BPTT on GPU** |
 
 "Parametric time-series models" most likely spans ARIMA/SARIMA, the GARCH family, VAR/VECM, exponential smoothing (ETS), and state-space models. **Which family dominates matters more than the count** — 156 univariate ARIMA fits are cheap and embarrassingly parallel; a VAR on 156 jointly-modelled series is `O(k³p³)` in the solve and behaves nothing like them.
 
-### 7.2 It is CPU work, and that is the main finding
+The same distinction applies to the two newly-named stages, and in opposite directions. **Causal discovery is one joint estimation whose cost is cubic in the number of variables** — it does not decompose across cores, and having fewer models does not make it cheaper; only reducing dimensionality does. **The neural forecasters are the reverse** — individually tiny, parallel across models, and cheap to batch.
 
-Every stage above is dense linear algebra or numerical optimisation over LAPACK/BLAS. **None of it consumes VRAM.**
+### 7.2 Mostly CPU work, with one real GPU stage — and the GPU is justified
 
-The current line item is a `g6.4xlarge`, chosen because its L4 gives 24 GB of VRAM against the "16 GB VRAM" written into the original spec. If this pipeline is the whole workload, **that GPU is dead weight** — a compute-optimised `c7i.4xlarge` (16 vCPU / 32 GB, ~$0.71/hr) does the same job at roughly half the rate, with better per-core BLAS throughput.
+The classical stages — clustering, whitening, PCA, ICA, the causal discovery of §7.7, and the ~156 parametric fits — are all dense linear algebra or numerical optimisation over LAPACK/BLAS. **None of them consume VRAM.**
 
-Two readings, and they should be resolved explicitly:
+**The recurrent forecasters of §7.8 do**, and they are what the "16 GB VRAM" in the original spec refers to. That resolves a question this report previously left open in the other direction:
 
-- **The pipeline is the whole workload** → drop the GPU, move to a CPU instance, save ~$80/month.
-- **Something else needs the 16 GB VRAM** — a neural forecaster, an embedding model, a deep state-space model → the GPU stays, and the classical pipeline rides along on the same box for free.
+- ~~The pipeline is the whole workload → drop the GPU, move to a CPU instance, save ~$80/month.~~ **Superseded.**
+- **Something else needs the VRAM — and it does: the neural forecasters.** The `g6.4xlarge` stays. Its L4 carries the recurrent training; its 16 vCPU carries every CPU stage on the same box.
 
-The saving is small. The reason to ask is that it determines whether this workload is GPU-contended with serving, which matters for capacity planning well beyond $80/month.
+**Modelled peak VRAM is under 2 GB** against the 16 GB requested, so the GPU is bought for throughput rather than capacity — recurrent training is a long chain of small sequential steps and utilises a large GPU poorly no matter which one is chosen. A smaller card would also serve.
+
+Two things follow for capacity planning. **One instance runs the entire workload** — no split between a CPU box and a GPU box. And **it does not contend with serving**: it is a separate instance from the `p5e.48xlarge`, so the GPU tier in §3 is untouched.
 
 ### 7.3 Two things about the pipeline that need confirming
 
 **Whitening and PCA are normally the same operation.** Both fall out of a single eigendecomposition of the covariance matrix — PCA whitening is projection onto the components followed by scaling to unit variance. Listing them as separate stages usually means one decomposition, not two. The cost model in §7.4 counts it once.
 
-**ICA conventionally runs *before* the downstream modelling, not after.** FastICA and Infomax both require whitened, dimension-reduced input as a precondition — that is what a PCA stage is normally *for*. An "ICA after modelling" step is unusual. It may mean **ICA on model residuals**, which is a legitimate technique for separating common shocks from idiosyncratic ones, but it is not the same computation and it is not costed the same way. **This is the one stage with no complexity estimate below**, because it is not yet clear what it is.
+**ICA conventionally runs *before* the downstream modelling, not after.** FastICA and Infomax both require whitened, dimension-reduced input as a precondition — that is what a PCA stage is normally *for*. An "ICA after modelling" step is unusual. It may mean **ICA on model residuals**, which is a legitimate technique for separating common shocks from idiosyncratic ones, but it is not the same computation and it is not costed the same way.
+
+> **The middle of the ordering is now resolved; the tail is not.** Naming the modelling stage as causal discovery (§7.7) makes *whitening → PCA → causal discovery* the conventional order rather than an inversion, since those estimators require whitened, reduced input for the same reason ICA does. **ICA appearing after it remains the open question**, and the residuals reading above is the likeliest answer. Worth noting that one of the two ICA mentions may be the same operation counted twice, since ICA-LiNGAM is itself an ICA-based estimator.
 
 ### 7.4 Cost model
 
@@ -351,13 +358,69 @@ Model *count* creates obligations that model *cost* does not. None of these are 
 4. **Model family per fit** — ARIMA, GARCH, VAR, state-space, or mixed.
 5. **Refit cadence versus inference cadence.** Refitting parameters is the expensive part; applying fitted models to new data is nearly free. The two are often conflated into a single "run frequency".
 6. **Whether all 156 refit every run**, or on a rolling/staggered schedule. Staggering flattens the peak and shrinks the instance.
-7. **What the "modelling" stage between PCA and ICA is** — §7.3.
-8. **Whether any stage needs a GPU** — §7.2.
+7. ~~What the "modelling" stage between PCA and ICA is~~ — **answered: causal discovery (§7.7).**
+8. ~~Whether any stage needs a GPU~~ — **answered: yes, the recurrent forecasters (§7.8).**
 9. **Cache and staleness policy** — run frequency, maximum acceptable result age, and cache-miss behaviour (serve stale / trigger on-demand / return unavailable; the last is usually correct for a latency-bound system).
+10. **Lag order for the dynamic causal models**, and whether it is fixed or selected over a range. It enters the cost cubically.
+11. **Which causal estimators run, and at what dimensionality** — on the raw series or the reduced components. **This is the single largest cost lever in the workload** (§7.7).
+12. **What "SF-Slinear" denotes** — two candidate readings, two orders of magnitude apart in cost (§7.7).
+13. **The RNN/GRU/LSTM shapes** — hidden width, layers, sequence length, epochs, and whether they are part of the 156 count or additional to it (§7.8).
 
 > **This does not threaten the headline number.** Even a generous reading is small against $311,089/year, and the existing instance carries four spare H200s and 192 vCPU to absorb it if it proves heavier than expected. But it should be sized rather than guessed, and the operational obligations in §7.5 are real work that is not currently in any estimate.
 
-Engineering detail, including the full derivation, is in `reference/SYSTEM_REQUIREMENTS.md` §7.
+### 7.7 Causal discovery — the modelling stage, now named
+
+The stage between PCA and ICA is **causal discovery**: estimating which variables drive which, rather than merely which move together. Three families are in scope, and they all fit a linear structural model — they differ in what identifies the causal direction.
+
+| Method | What identifies the graph | Cost | Notes |
+|---|---|---|---|
+| **LiNGAM** (ICA-LiNGAM, DirectLiNGAM) | **Non-Gaussianity** of the noise. Under Gaussian noise the direction is not identifiable at all | `O(n·d³)` for the deterministic variant | **If the inputs are near-Gaussian after whitening, LiNGAM returns an arbitrary ordering rather than an error.** This needs an explicit check — see §7.5 |
+| **VAR-LiNGAM** | The same, extended to lagged effects: fit a VAR, then LiNGAM on the residuals | `O(n·d²p² + (d·p)³)` | The lag order enters cubically |
+| **DYNOTEARS** | A smooth acyclicity penalty replacing combinatorial search, solved by gradient descent | `O(T · (n·d²(1+p) + d³))` over thousands of iterations | **The expensive one** |
+| **SF-Slinear** | **Ambiguous — see below** | either `O(d²·n·s)` or negligible | Needs confirming |
+
+**The finding that matters for cost: these are cubic in the number of variables, and they do not parallelise.** Unlike the 156 parametric fits, causal discovery is one joint estimation over all variables at once. Adding cores does not help; reducing dimensionality does. Running it on the retained components rather than the raw series is the difference between **seconds and hours**, and it is also the reason the PCA stage exists.
+
+> **DYNOTEARS is the wall-clock risk in this workload — not the neural models.** It carries a matrix-exponential term that is cubic in the variable count and evaluates it thousands of times. On reduced components it is ~10–20 minutes; on 500 raw series it is hours. This one configuration choice determines whether a daily run fits in its window.
+
+**"SF-Slinear" could not be identified unambiguously and has not been guessed at.** It is either sparse/stepwise-forward linear structure learning — a genuine causal-discovery stage costing `O(d²·n·s)` — or the LTSF-Linear forecaster family (SLinear/DLinear/NLinear), which is a single dense matrix per series and effectively free. The grouping in the source list suggests the first; the name suggests the second. **Please confirm which.**
+
+### 7.8 Recurrent neural forecasters — RNN, GRU, LSTM
+
+The workload also trains recurrent neural networks alongside the parametric fits. **These are the only stage that uses the GPU**, and they are what the 16 GB VRAM in the original spec is for.
+
+The three architectures differ only in how much machinery each timestep carries — one transform for a plain RNN, three gates for a GRU, four for an LSTM — which makes their relative cost **1 : 3 : 4** at equal width. LSTM and GRU exist because their gated updates let gradients flow backwards through long sequences where a plain RNN's vanish.
+
+Training cost follows the same rule used for the LLM in §9: `6 × parameters × tokens seen`. At a representative shape — a 2-layer LSTM of width 128 over 64-step windows, trained across 156 series — that is:
+
+| | |
+|---|---|
+| Parameters per model | ~198,000 — **five orders of magnitude smaller than the LLM** |
+| Total training compute, all 156 | ~9.3×10¹⁴ flops |
+| **Wall-clock, batched** | **~5 minutes** |
+| **Peak VRAM** | **< 2 GB**, against 16 GB requested |
+
+**Two findings:**
+
+1. **These models are small, and the GPU is bought for throughput rather than capacity.** Reaching 16 GB of VRAM would take roughly a 50× increase in width or model count.
+2. **A faster GPU would not help much.** Recurrent training is a long chain of small sequential steps — each timestep waits for the previous one — so it uses only a few percent of any large GPU's capability. The lever is batching across the 156 models, which is free. **Do not size this stage by buying a bigger card.**
+
+Sensitivity is concentrated in two parameters: hidden width enters the cost quadratically, sequence length linearly in both compute and memory. A substantially wider or longer configuration than the one above turns minutes into hours, which is why §7.6 item 13 asks for the shapes.
+
+### 7.9 The workload consolidated
+
+| Stage | Hardware | Illustrative wall-clock |
+|---|---|---|
+| Clustering / whitening / PCA / ICA | CPU | < 3 s |
+| Causal discovery — LiNGAM / VAR-LiNGAM | CPU | ~5 s |
+| **Causal discovery — DYNOTEARS** | CPU, multi-core | **~10–20 min ← dominant** |
+| ~156 parametric time-series fits | CPU, parallel | ~2 min on 16 cores |
+| **RNN / GRU / LSTM training** | **GPU** | **~5 min** |
+| **Total per run** | **one `g6.4xlarge`** | **~20–30 minutes** |
+
+At ~20–30 minutes per daily run the true cost is nearer **~$25/month** than the $159 placeholder. The 4 h/day assumption is retained as a deliberate ceiling until real dimensions arrive — see Appendix A #10.
+
+Engineering detail, including the full derivation and the complete equations for every method above, is in `reference/SYSTEM_REQUIREMENTS.md` §7 — specifically §7.8 (causal discovery), §7.9 (neural models) and §7.10 (consolidated).
 
 ---
 
@@ -459,10 +522,10 @@ B200 @ ~900 TFLOPS effective          → ~50,000 tok/s → ~4.3 B tokens/day
 | Auth service | `m7g.large` | 0.082 | 2 | $120 |
 | Graph ingestion worker (8 vCPU) | `c7g.2xlarge` | 0.290 | 1 | $212 |
 | Vector DB (self-hosted) | `r7g.xlarge` | 0.214 | 3 | $469 |
-| Scheduled analytics pipeline *(provisional — §7)* | `g6.4xlarge` | 1.323 | ~4 h/day | $159 |
+| Mathematical-model workload *(runtime provisional — §7)* | `g6.4xlarge` | 1.323 | ~4 h/day | $159 |
 | | | | **Subtotal** | **~$1,912** |
 
-*The analytics-pipeline line is a placeholder, not an estimate — see §7. It could plausibly fall (CPU instance, minutes per run instead of hours) or rise (high-dimensional input, hourly refits). Either way it is small against the GPU tier, and the existing instance has spare capacity to absorb it.*
+*The instance choice on this line is no longer provisional — the `g6.4xlarge` is justified by the RNN/GRU/LSTM stage (§7.8), and its 16 vCPU carries the CPU stages on the same box. What remains provisional is runtime: it could plausibly fall (~20–30 minutes per run rather than 4 hours) or rise (causal discovery at full dimensionality, hourly refits). Either way it is small against the GPU tier, and the existing instance has spare capacity to absorb it.*
 
 ### 9.3 Managed services and storage
 
@@ -626,7 +689,7 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 ### Needed to finalise sizing
 
 5. **Exact Qwen3.6-35B-A3B config** — layer count, KV heads, head_dim, expert count. The KV math in §3.2 assumes a Qwen3-30B-A3B-class shape.
-6. **The mathematical-model workload (§7) — the largest unsized item in this report.** Nine inputs are needed, listed in §7.6 and in `reference/SYSTEM_REQUIREMENTS.md` §7.6: data dimensions (`n`, `d`, `k`), what the "156 models" actually counts, the model family per fit, refit versus inference cadence, whether all fits refresh every run, what the "modelling" stage between PCA and ICA is, whether any stage needs a GPU, and the cache staleness and miss policy.
+6. **The mathematical-model workload (§7) — the largest unsized item in this report.** Thirteen inputs are needed, listed in §7.6 and in `reference/SYSTEM_REQUIREMENTS.md` §7.6: data dimensions (`n`, `d`, `k`), what the "156 models" actually counts, the model family per fit, refit versus inference cadence, whether all fits refresh every run, the cache staleness and miss policy, the lag order for the dynamic causal models, **which causal estimators run and at what dimensionality**, **what "SF-Slinear" denotes**, and **the RNN/GRU/LSTM shapes**. Naming the model families closed the two questions that used to head this list — what the modelling stage is, and whether any stage needs a GPU.
 7. **Knowledge-graph extraction density** — entities and edges per conversation, which drives §6 growth numbers.
 8. **Whether graph weight calculation is incremental or global** — 8 vCPU supports the former, not the latter at scale.
 
@@ -644,7 +707,8 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 | p5e 3-year reserved rate worse than the derived $27.344/hr | Budget overrun on the largest line | Confirm with AWS before the purchase order (§9.1) |
 | Concurrency figure (~25 streams) not derived from the stated arrival rate | Batch sizes, and therefore every latency number, rest on an unverified input | Conservative direction — real latency should be better, not worse. Measure directly under production traffic; see `reference/SYSTEM_REQUIREMENTS.md` §2.1.8 |
 | Analytics pipeline (~156 models) materially larger than the $159/mo placeholder | Non-GPU compute line rises; a high-dimensional input could need its own instance | Off the request path, so no SLA exposure. 4 spare GPUs and 192 vCPU already on the instance. Size it properly with §7.6 |
-| Analytics pipeline provisioned on a GPU instance it does not use | ~$80/month wasted, and false GPU contention in capacity planning | Confirm whether any stage needs VRAM (§7.2); if not, move to `c7i.4xlarge` |
+| ~~Analytics pipeline provisioned on a GPU instance it does not use~~ **— closed** | — | Resolved: the RNN/GRU/LSTM stage needs the GPU (§7.8). The `g6.4xlarge` stays |
+| Causal discovery run at full dimensionality rather than on reduced components | DYNOTEARS' cubic term turns a ~20-minute run into hours; a daily job could stop fitting in its window | Run causal discovery on the retained components, or per-cluster subgraphs (§7.7). Off the request path, so no SLA exposure either way |
 
 ---
 
@@ -673,7 +737,7 @@ Self-hosting is nonetheless justified here, for reasons that are not cost:
 - [ ] Measure the real prefix-cache hit rate under agentic traffic (assumed ~50% prefill saving)
 - [ ] **Measure concurrent decoding streams and decode wall-time under production-shaped traffic** — resolves the ~6-vs-~25 gap (`reference/SYSTEM_REQUIREMENTS.md` §2.1.8) that underpins every batch size and latency figure
 - [ ] **Confirm the daily load profile** — 24-hour uniform, or concentrated into business hours
-- [ ] **Specify the mathematical-model workload** against the nine inputs in §7.6, then re-cost the line in §9.2
+- [ ] **Specify the mathematical-model workload** against the thirteen inputs in §7.6, then re-cost the line in §9.2 — in particular the dimensionality causal discovery runs at, and the RNN/GRU/LSTM shapes
 - [ ] **Time one full pipeline run on representative data** — wall-clock and peak RSS. Settles instance type, run window, and whether a GPU is needed at all
 - [ ] Measure the actual distribution of iterations per conversation (assumed avg 2.5, cap 6)
 - [ ] Confirm SSE streaming delivers time-to-first-token under ~3 s
@@ -700,7 +764,7 @@ Every number in this report derives from the inputs in §1 plus the following. E
 | 7 | Decode wall-time per conversation | ~5 s | Sets concurrent stream count via Little's Law |
 | 8 | Knowledge-graph extraction density | ~10 entities + 20 edges per conversation | Linear on graph growth and storage |
 | 9 | Training MFU | 40% | Linear on continued-pre-training throughput |
-| 10 | Scheduled analytics pipeline runtime | ~4 h/day on `g6.4xlarge` | **Placeholder, not an estimate.** The workload is ~156+ time-series models behind a clustering/PCA/ICA pipeline whose dimensions are unspecified — see §7. Plausible range spans under $100/mo to a dedicated instance |
+| 10 | Mathematical-model workload runtime | ~4 h/day on `g6.4xlarge` | **Placeholder, deliberately conservative.** ~156+ time-series models behind a clustering/PCA/causal-discovery/ICA pipeline plus RNN/GRU/LSTM forecasters, dimensions unspecified — see §7. The illustrative worked example runs ~20–30 min/day, so 4 h is retained as a ceiling until real dimensions arrive. The instance choice is no longer an assumption: the recurrent models justify the GPU |
 | 11 | Commercial API comparison rate | $0.50/M in, $1.50/M out | Shifts the build-vs-buy multiple in §10 |
 | 12 | Utilisation basis | 730 hours/month | Standard AWS month |
 | 13 | `p5e` 3-year reserved discount | 43.2% of on-demand, taken from `p5` | ±$25k/yr on the largest line; **derived, not quoted — confirm with AWS** |
