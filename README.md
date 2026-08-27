@@ -30,7 +30,7 @@ About **$6k/month** of supporting services sits on top of the GPU line — datab
 
 ---
 
-## What the money buys
+## Fine-Tuning & Inference Deployment Architecture
 
 ### Fig. 1 — Live production request path
 
