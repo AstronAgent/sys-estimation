@@ -77,6 +77,7 @@ RL and continued pre-training run on the spare H200s of the same instance. Nothi
 | File | What it is |
 |---|---|
 | [PLATFORM_REPORT.md](PLATFORM_REPORT.md) | **Start here.** Full report: sizing, latency budget, the mathematical-model workload (§7), complete AWS cost breakdown, build-vs-buy, risks, recommendations. |
+| [COMPONENTS.md](COMPONENTS.md) | **Quick reference.** Every component in one flat list — name, instance type, vCPU/RAM/GPU, quantity, monthly cost. |
 | [deployment-architecture.md](deployment-architecture.md) | Both diagrams — rendered images plus the Mermaid source. |
 | [deployment-architecture.html](deployment-architecture.html) | Same diagrams as self-contained inline SVG, with PNG/PDF export buttons. Open locally. |
 | [images/](images/) | Rendered figures — PNG for viewing, SVG for print. |
