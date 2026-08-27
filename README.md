@@ -1,4 +1,4 @@
-# Qwen3.6-35B-A3B — self-hosted LLM platform, AWS cost estimate
+# FT Qwen3.6-35B-A3B — self-hosted LLM platform, AWS cost estimate
 
 Server sizing and AWS cost for a self-hosted **Qwen/Qwen3.6-35B-A3B** platform: SGLang serving, a graph-based MCP harness, a continuously-ingested knowledge graph, and a continuous RL pipeline with gated hot-swap deployment.
 
